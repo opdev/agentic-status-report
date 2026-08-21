@@ -9,6 +9,10 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full design.
 ## Quick start
 
 ```bash
+# Install Postgres (Fedora: dnf install postgresql-server, macOS: brew install postgresql)
+# Start it: sudo systemctl start postgresql (or pg_ctl start on macOS)
+createdb weekly_status
+
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
