@@ -29,17 +29,13 @@ source data.
     "outcome": "string",
     "blocker": "string | null",
     "ask": "string | null",
-    "evidence": ["EET-4853", "https://github.com/..."]
+    "evidence": ["EET-4853", "https://github.com/..."],
+    "evidence_labels": {"EET-4853": "hosted pipeline failure"}
   }],
   "participation": [{
     "person_id": "string",
     "display_name": "string",
     "status": "confirmed | expired | on_leave | sent | send_failed"
-  }],
-  "flags": [{
-    "message": "string",
-    "person_id": "string | null",
-    "epic_key": "string | null"
   }]
 }
 ```
@@ -71,8 +67,11 @@ Date format: `Aug 14, 2026` (month abbreviation, day, year).
 Assign each entry to exactly one main section:
 
 - **Partner Enablement** — work directly with partners/customers on their specific projects or deployments
+  - Partner certification support (Oracle, IBM, ITRS, SAS, etc.) → Partner Enablement under the **partner name**, not Certification/CI
+  - Example: "Helped Oracle publish DB Operator certification" → `* **Oracle** - ...` under Partner Enablement
 - **Certification / CI** — work on certification tools, programs, and infrastructure (Preflight, Chart-Verifier, OCO, Helm Cert, etc.)
   - Even if the work involves helping partners, if it is work ON a certification tool itself, it belongs in Certification/CI
+  - Example: OpenShift Cluster Management Bot epic, Chart-Verifier releases → Certification/CI
   - Example: Fixing a bug in Chart-Verifier → Certification/CI → Chart-Verifier, NOT Partner Enablement
 - **Mindshare** — upstream contributions, conferences, blogs, and tutorials
 
@@ -81,6 +80,13 @@ Special routing:
 - Anything related to TSSC (Trusted Software Supply Chain) → **Red Hat Developer Hub** in Certification/CI
 
 Use `epic_name` as the bold inline name when available. Fall back to `project` or a sensible subsection name.
+
+**Subcategory normalization** (match legacy `parse_and_format.py` behavior):
+
+- Mindshare entries that are partner-facing updates → **Partner Enablement → OCP-V Partner Onboarding Strategy**
+- Certification/CI: `olm` / Operator Lifecycle Manager, `oco` → Operator Certification Operator, `rukpak` → RukPak, `catalogd` → Catalogd, pipeline-alerts → CI Pipeline, MCP Cert, Vulnerability Scanner Cert / rhacs
+- Mindshare: conference → Upcoming Conferences, blog/tutorial → Blogs/Tutorials, workshop → Workshops
+- Partner Enablement: openshift virtualization / ocp-v → OCP-V Partner Onboarding Strategy
 
 **Exclude entirely:** entries with state `quiet` unless the team needs visibility on ongoing quiet epics (omit rather than pad).
 
@@ -93,7 +99,7 @@ Use `epic_name` as the bold inline name when available. Fall back to `project` o
 - Sort entries alphabetically within each main section.
 - Non-responders (`participation.status = expired`) → add a note at the end of the relevant section or a brief "Team participation" note: "No update from {name} this week." Never silently omit.
 - Every non-null `ask` from any entry must appear in a **Decisions needed** subsection (add after Mindshare if any asks exist). Render verbatim or near-verbatim.
-- `flags` from input → render as plain observations, not risk characterizations.
+- **Never include gap-detection or data-quality commentary** — omit phrases like "no linked Jira tickets", "no linked commits or PRs", "backlog status in Jira despite PRs merging", or similar audit observations. Report only what work happened (`outcome`), blockers, and asks.
 
 ## Formatting rules
 
@@ -119,10 +125,14 @@ Use `epic_name` as the bold inline name when available. Fall back to `project` o
 - Use `evidence` array URLs directly for GitHub links
 - Every hyperlink from source evidence must appear in the output
 - Do not invent URLs not present in evidence
+- For Jira keys, use `evidence_labels[KEY]` as the link text when present (mid-sentence noun phrase)
+- When `evidence_labels` is missing for a key, derive link text only from words already in `outcome` — do not invent titles
+- **Never write `[text]` without a `(url)`** — invalid markdown links are rejected
+- Do not add a `## Notes` section
 
 ## Output
 
-Return only this JSON. No markdown fences around the whole response, no preamble.
+Return only this JSON as plain text in a text block. Write the JSON directly — do not use the code execution tool. No markdown fences around the whole response, no preamble.
 
 ```json
 {
