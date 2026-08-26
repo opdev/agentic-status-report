@@ -297,3 +297,113 @@ def get_current_drafts(session: Session, person_id: str, week_ending: date) -> l
         StatusEntry.confirmed_at.is_(None),
     )
     return list(session.scalars(stmt).all())
+
+
+def persist_edited_entries(
+    session: Session,
+    person_id: str,
+    week_ending: date,
+    *,
+    edited_outcomes: dict[int, str],  # index -> new outcome
+    dropped_indices: set[int],
+    unticketed_work: str | None,
+    leadership_asks: str | None,
+) -> list[StatusEntry]:
+    """Create new 'drafted_edited' revisions for changed entries.
+
+    Args:
+        session: Database session
+        person_id: Person ID
+        week_ending: Week ending date
+        edited_outcomes: Map of entry index to new outcome text
+        dropped_indices: Set of indices to remove
+        unticketed_work: Optional unticketed work description
+        leadership_asks: Optional leadership asks
+
+    Returns:
+        List of newly created/updated entries
+    """
+    # Get current drafts in order
+    current_entries = get_current_drafts(session, person_id, week_ending)
+    if not current_entries:
+        return []
+
+    # Supersede all current drafts
+    for entry in current_entries:
+        entry.is_current = False
+
+    edited_at = datetime.now(timezone.utc)
+    new_entries: list[StatusEntry] = []
+
+    # Process each entry
+    for idx, entry in enumerate(current_entries):
+        # Skip dropped entries
+        if idx in dropped_indices:
+            continue
+
+        # Check if outcome was edited
+        new_outcome = edited_outcomes.get(idx)
+        if new_outcome and new_outcome.strip() != entry.outcome.strip():
+            # Create edited revision
+            new_entry = StatusEntry(
+                week_ending=week_ending,
+                person_id=person_id,
+                epic_key=entry.epic_key,
+                epic_name_snapshot=entry.epic_name_snapshot,
+                project=entry.project,
+                state=entry.state,
+                outcome=new_outcome.strip(),
+                blocker=entry.blocker,
+                ask=leadership_asks if leadership_asks and leadership_asks.strip() else entry.ask,
+                draft_outcome=entry.draft_outcome,  # Preserve original draft
+                source=EntrySource.DRAFTED_EDITED.value,
+                confidence=entry.confidence,
+                needs_human=False,  # Human just reviewed it
+                prompt_version=entry.prompt_version,
+                evidence=entry.evidence,
+                extra=entry.extra,
+                revision=entry.revision + 1,
+                supersedes_entry_id=entry.entry_id,
+                is_current=True,
+                drafted_at=entry.drafted_at,
+                confirmed_at=None,
+            )
+            session.add(new_entry)
+            new_entries.append(new_entry)
+        else:
+            # No change, keep as current but update asks if provided
+            entry.is_current = True
+            if leadership_asks and leadership_asks.strip():
+                entry.ask = leadership_asks.strip()
+            new_entries.append(entry)
+
+    # Add unticketed work as a new entry if provided
+    if unticketed_work and unticketed_work.strip():
+        unticketed_entry = StatusEntry(
+            week_ending=week_ending,
+            person_id=person_id,
+            epic_key=None,
+            epic_name_snapshot=None,
+            project="Unticketed",
+            state="progressing",
+            outcome=unticketed_work.strip(),
+            blocker=None,
+            ask=None,
+            draft_outcome=None,
+            source=EntrySource.HUMAN_WRITTEN.value,
+            confidence="high",
+            needs_human=False,
+            prompt_version="manual",
+            evidence=[],
+            extra={},
+            revision=1,
+            supersedes_entry_id=None,
+            is_current=True,
+            drafted_at=edited_at,
+            confirmed_at=None,
+        )
+        session.add(unticketed_entry)
+        new_entries.append(unticketed_entry)
+
+    session.flush()
+    return new_entries
