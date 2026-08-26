@@ -7,6 +7,7 @@ from datetime import date
 from typing import Any
 
 from status.db.models import Flag, StatusEntry
+from status.skills.evidence import markdown_links_to_slack
 
 ACTION_CONFIRM = "status_confirm"
 ACTION_EDIT = "status_edit"
@@ -26,6 +27,8 @@ def _action_value(person_id: str, week_ending: date) -> str:
 
 
 def _entry_title(entry: StatusEntry) -> str:
+    if entry.epic_key and entry.epic_name_snapshot:
+        return f"{entry.epic_key} · {entry.epic_name_snapshot}"
     if entry.epic_name_snapshot:
         return entry.epic_name_snapshot
     if entry.epic_key:
@@ -35,11 +38,12 @@ def _entry_title(entry: StatusEntry) -> str:
 
 def format_entry_text(entry: StatusEntry) -> str:
     label = STATE_LABELS.get(entry.state, entry.state.title())
-    lines = [f"*{label}* · {_entry_title(entry)}", entry.outcome]
+    outcome = markdown_links_to_slack(entry.outcome)
+    lines = [f"*{label}* · {_entry_title(entry)}", outcome]
     if entry.blocker:
-        lines.append(f"_Blocker:_ {entry.blocker}")
+        lines.append(f"_Blocker:_ {markdown_links_to_slack(entry.blocker)}")
     if entry.ask:
-        lines.append(f"_Ask:_ {entry.ask}")
+        lines.append(f"_Ask:_ {markdown_links_to_slack(entry.ask)}")
     if entry.needs_human:
         lines.append("_Needs your review_")
     return "\n".join(lines)
@@ -85,7 +89,6 @@ def build_draft_blocks(
             },
         },
     ]
-    blocks.extend(build_flag_blocks(flags))
 
     if not entries:
         blocks.append(
@@ -117,6 +120,8 @@ def build_draft_blocks(
                     ],
                 }
             )
+
+    blocks.extend(build_flag_blocks(flags))
 
     if confirmed:
         blocks.append(

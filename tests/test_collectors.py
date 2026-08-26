@@ -10,7 +10,7 @@ from status.collectors.github import (
 )
 from status.config import Settings
 from status.collectors.payload import build_payload
-from status.collectors.jira import build_jql, normalize_jira_issue
+from status.collectors.jira import build_jql, filter_person_jira_issues, normalize_jira_issue
 
 
 def test_build_jql_email_skips_commented_by() -> None:
@@ -68,8 +68,31 @@ def test_normalize_jira_issue_transitions_and_comments() -> None:
     )
     assert normalized["key"] == "EET-5000"
     assert normalized["epic_key"] == "EET-4900"
+    assert normalized["is_assignee"] is False
     assert len(normalized["transitions"]) == 1
     assert len(normalized["comments"]) == 1
+
+
+def test_filter_person_jira_issues_drops_watcher_only_rows() -> None:
+    issues = [
+        {
+            "key": "EET-5527",
+            "is_assignee": False,
+            "is_reporter": False,
+            "transitions": [],
+            "comments": [],
+            "assignee_display_name": "Manna",
+        },
+        {
+            "key": "EET-5528",
+            "is_assignee": True,
+            "is_reporter": False,
+            "transitions": [],
+            "comments": [],
+        },
+    ]
+    kept = filter_person_jira_issues(issues, "712020:abc-def012345678")
+    assert [row["key"] for row in kept] == ["EET-5528"]
 
 
 def test_extract_issue_keys() -> None:

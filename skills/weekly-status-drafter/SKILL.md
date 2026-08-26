@@ -30,6 +30,10 @@ You receive a JSON payload:
       "summary": "string",
       "issue_type": "Story | Bug | Task | Spike",
       "status": "string",
+      "assignee_account_id": "string | null",
+      "assignee_display_name": "string | null",
+      "is_assignee": true,
+      "is_reporter": false,
       "epic_key": "AIPLAT-204 | null",
       "epic_name": "string | null",
       "project": "string",
@@ -73,6 +77,36 @@ the fastest way to lose the reviewer's trust.
 Tickets with no epic go into a single entry per project, with
 `epic_key: null` and `needs_human: true` — the human usually knows which
 initiative it belonged to and can say so in one word.
+
+## Ownership
+
+Only report tickets **this person worked on this week**. Use `is_assignee`,
+`transitions`, `comments`, linked PRs, and commits — not every sibling ticket
+under the same epic.
+
+- If a ticket is in `jira_issues` but `is_assignee` is false and the person had
+  no transition or comment on it, do **not** cite it in `evidence` or `outcome`.
+- Never summarize someone else's assignee work under this person's draft (e.g. do
+  not mention M4/M5 milestone labels for tickets assigned to a teammate).
+- Epic-level entries should describe **this person's** shipped or in-progress
+  work, not the whole epic's backlog.
+
+## Outcome phrasing and links
+
+Write `outcome` as one or two sentences the manager can scan. Use **markdown
+links** for Jira tickets and PRs:
+
+- Good: `Working on [edit and regenerate flows for Slack confirmation](https://redhat.atlassian.net/browse/EET-5527) and [synthesizer skill and report delivery](https://redhat.atlassian.net/browse/EET-5528).`
+- Bad: `M4 and M5 in progress; edit and regenerate flows plus synthesizer skill active.`
+
+Rules:
+
+- Do **not** use bare milestone numbers (`M4`, `M5`, `m3.5`) as shorthand —
+  use the ticket summary as link text (drop the `M5:` prefix when it is only a
+  label, not the work description).
+- Link every Jira key you mention: `[summary phrase](https://redhat.atlassian.net/browse/KEY)`.
+- PR evidence: `[short PR title](https://github.com/org/repo/pull/N)`.
+- Up to ~45 words when multiple linked items are needed; prefer links over vague rollup.
 
 ## Translating engineer language
 
@@ -171,7 +205,7 @@ Return only this JSON. No prose, no markdown fences, no preamble.
       "epic_key": "string | null",
       "epic_name": "string | null",
       "state": "shipped | progressing | slipped | blocked | quiet",
-      "outcome": "one sentence, under 30 words, past tense, no adjectives of impact",
+      "outcome": "one or two sentences with markdown links; past tense; no bare milestone numbers",
       "evidence": ["AIPLAT-231", "https://github.com/org/repo/pull/88"],
       "blocker": "one sentence | null",
       "ask": "a specific decision or resource needed from management | null",

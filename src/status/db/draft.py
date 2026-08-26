@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timezone
 from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from status.db.models import EntrySource, Epic, Flag, Person, StatusEntry
+from status.db.models import EntrySource, Epic, Flag, Participation, Person, StatusEntry
 from status.skills.schemas import DraftEntry, DraftOutput
+
+log = logging.getLogger(__name__)
 
 
 def ensure_person(session: Session, person_id: str, *, display_name: str | None = None) -> Person:
@@ -47,16 +50,31 @@ def _parse_week_ending(value: str) -> date:
 
 def supersede_unconfirmed_drafts(session: Session, person_id: str, week_ending: date) -> int:
     """Mark unconfirmed current drafts as non-current. Returns rows superseded."""
-    stmt = select(StatusEntry).where(
-        StatusEntry.person_id == person_id,
-        StatusEntry.week_ending == week_ending,
-        StatusEntry.is_current.is_(True),
-        StatusEntry.confirmed_at.is_(None),
+    result = session.execute(
+        update(StatusEntry)
+        .where(
+            StatusEntry.person_id == person_id,
+            StatusEntry.week_ending == week_ending,
+            StatusEntry.is_current.is_(True),
+            StatusEntry.confirmed_at.is_(None),
+        )
+        .values(is_current=False)
     )
-    rows = list(session.scalars(stmt).all())
-    for row in rows:
-        row.is_current = False
-    return len(rows)
+    return int(result.rowcount or 0)
+
+
+def supersede_current_drafts(session: Session, person_id: str, week_ending: date) -> int:
+    """Mark all current rows non-current so a full re-draft can be persisted."""
+    result = session.execute(
+        update(StatusEntry)
+        .where(
+            StatusEntry.person_id == person_id,
+            StatusEntry.week_ending == week_ending,
+            StatusEntry.is_current.is_(True),
+        )
+        .values(is_current=False)
+    )
+    return int(result.rowcount or 0)
 
 
 def acknowledge_draft_flags(session: Session, person_id: str, week_ending: date) -> int:
@@ -121,20 +139,48 @@ def _find_superseded_row(
     week_ending: date,
     epic_key: str | None,
 ) -> StatusEntry | None:
-    """Find the most recent superseded unconfirmed row for the same epic grain."""
+    """Find the most recent superseded row for the same epic grain."""
     stmt = (
         select(StatusEntry)
         .where(
             StatusEntry.person_id == person_id,
             StatusEntry.week_ending == week_ending,
             StatusEntry.is_current.is_(False),
-            StatusEntry.confirmed_at.is_(None),
             StatusEntry.epic_key == epic_key if epic_key else StatusEntry.epic_key.is_(None),
         )
         .order_by(StatusEntry.created_at.desc())
         .limit(1)
     )
     return session.scalars(stmt).first()
+
+
+def _reset_participation_for_redraft(
+    session: Session,
+    person_id: str,
+    week_ending: date,
+) -> None:
+    row = session.get(Participation, (person_id, week_ending))
+    if row is None:
+        return
+    if row.status == "confirmed":
+        row.status = "sent"
+        row.confirmed_at = None
+
+
+def dedupe_draft_entries(entries: list[DraftEntry]) -> list[DraftEntry]:
+    """Keep one entry per epic; unticketed rows are keyed by project + outcome."""
+    seen: dict[str | tuple[str, ...], DraftEntry] = {}
+    order: list[str | tuple[str, ...]] = []
+    for entry in entries:
+        key: str | tuple[str, ...]
+        if entry.epic_key:
+            key = entry.epic_key
+        else:
+            key = ("unticketed", entry.project, entry.outcome)
+        if key not in seen:
+            order.append(key)
+        seen[key] = entry
+    return [seen[key] for key in order]
 
 
 def persist_draft_output(
@@ -144,16 +190,28 @@ def persist_draft_output(
     prompt_version: str,
     collection_errors: list[str] | None = None,
 ) -> tuple[list[StatusEntry], int]:
-    """Replace unconfirmed drafts for (person, week) with a new draft revision."""
+    """Replace current drafts for (person, week) with a new draft revision."""
     week_ending = _parse_week_ending(draft.week_ending)
     ensure_person(session, draft.person)
-    superseded_count = supersede_unconfirmed_drafts(session, draft.person, week_ending)
+    superseded_count = supersede_current_drafts(session, draft.person, week_ending)
+    session.flush()
+    _reset_participation_for_redraft(session, draft.person, week_ending)
+
+    entries = dedupe_draft_entries(draft.entries)
+    if len(entries) < len(draft.entries):
+        log.warning(
+            "dropped %s duplicate draft entries for %s week %s",
+            len(draft.entries) - len(entries),
+            draft.person,
+            week_ending.isoformat(),
+        )
+
     acknowledge_draft_flags(session, draft.person, week_ending)
 
     drafted_at = datetime.now(timezone.utc)
     saved: list[StatusEntry] = []
 
-    for entry in draft.entries:
+    for entry in entries:
         if entry.epic_key and entry.epic_name:
             upsert_epic(session, entry.epic_key, entry.epic_name, entry.project)
 
@@ -173,6 +231,7 @@ def persist_draft_output(
         session,
         draft,
         week_ending,
+        entries=entries,
         collection_errors=collection_errors or [],
     )
     session.flush()
@@ -184,6 +243,7 @@ def _persist_flags(
     draft: DraftOutput,
     week_ending: date,
     *,
+    entries: list[DraftEntry],
     collection_errors: list[str],
 ) -> None:
     for message in draft.flags:
@@ -216,7 +276,7 @@ def _persist_flags(
             )
         )
 
-    for entry in draft.entries:
+    for entry in entries:
         if entry.why_flagged:
             session.add(
                 Flag(

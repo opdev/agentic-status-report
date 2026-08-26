@@ -178,6 +178,17 @@ def normalize_jira_issue(
     fields = issue.get("fields", {})
     epic_key, epic_name = _epic_from_fields(fields, epic_field)
     updated = _parse_jira_dt(fields.get("updated"))
+    assignee = fields.get("assignee") or {}
+    reporter = fields.get("reporter") or {}
+    assignee_account_id = assignee.get("accountId")
+    reporter_account_id = reporter.get("accountId")
+    transitions = _transitions_from_changelog(changelog, week_start, week_end)
+    comments = _comments_in_window(
+        fields,
+        week_start,
+        week_end,
+        author_account_id=jira_account_id,
+    )
 
     return {
         "key": issue.get("key", ""),
@@ -187,13 +198,13 @@ def normalize_jira_issue(
         "epic_key": epic_key,
         "epic_name": epic_name,
         "project": fields.get("project", {}).get("key", ""),
-        "transitions": _transitions_from_changelog(changelog, week_start, week_end),
-        "comments": _comments_in_window(
-            fields,
-            week_start,
-            week_end,
-            author_account_id=jira_account_id,
-        ),
+        "assignee_account_id": assignee_account_id,
+        "assignee_display_name": assignee.get("displayName"),
+        "reporter_account_id": reporter_account_id,
+        "is_assignee": bool(jira_account_id and assignee_account_id == jira_account_id),
+        "is_reporter": bool(jira_account_id and reporter_account_id == jira_account_id),
+        "transitions": transitions,
+        "comments": comments,
         "last_updated": updated.isoformat() if updated else fields.get("updated", ""),
         "in_progress_since": _in_progress_since(fields, changelog),
     }
@@ -311,6 +322,8 @@ def collect_jira_activity(
         "comment",
         "parent",
         "updated",
+        "assignee",
+        "reporter",
     ]
     if settings.jira_epic_field:
         fields.append(settings.jira_epic_field)
@@ -367,3 +380,56 @@ def collect_jira_activity(
         )
 
     return normalized
+
+
+def filter_person_jira_issues(
+    issues: list[dict[str, Any]],
+    jira_account_id: str | None,
+) -> list[dict[str, Any]]:
+    """Drop issues where the person is only a watcher on someone else's ticket."""
+    if not jira_account_id or not ACCOUNT_ID_RE.match(jira_account_id):
+        return issues
+
+    kept: list[dict[str, Any]] = []
+    for issue in issues:
+        if issue.get("is_assignee") or issue.get("is_reporter"):
+            kept.append(issue)
+        elif issue.get("transitions") or issue.get("comments"):
+            kept.append(issue)
+        else:
+            log.debug(
+                "dropping %s — assignee is %s, not %s",
+                issue.get("key"),
+                issue.get("assignee_display_name"),
+                jira_account_id,
+            )
+    return kept
+
+
+def fetch_jira_summaries(
+    keys: list[str],
+    *,
+    settings: Settings | None = None,
+) -> dict[str, str]:
+    """Fetch issue summaries for explicit keys (used to label evidence at synthesize time)."""
+    unique = sorted({key for key in keys if ISSUE_KEY_RE.match(key)})
+    if not unique:
+        return {}
+
+    settings = settings or get_settings()
+    headers = _auth_header(settings)
+    base = settings.jira_base_url.rstrip("/")
+    jql = "key in (" + ", ".join(unique) + ")"
+    data = post_json(
+        f"{base}/rest/api/3/search/jql",
+        {"jql": jql, "maxResults": len(unique), "fields": ["summary"]},
+        headers=headers,
+    )
+
+    summaries: dict[str, str] = {}
+    for issue in data.get("issues", []):
+        key = issue.get("key")
+        summary = issue.get("fields", {}).get("summary")
+        if key and summary:
+            summaries[str(key)] = str(summary).strip()
+    return summaries
