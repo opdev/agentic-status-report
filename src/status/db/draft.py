@@ -50,6 +50,8 @@ def _parse_week_ending(value: str) -> date:
 
 def supersede_unconfirmed_drafts(session: Session, person_id: str, week_ending: date) -> int:
     """Mark unconfirmed current drafts as non-current. Returns rows superseded."""
+    # Use UPDATE statement to ensure immediate database-level change
+    # This is more reliable than modifying objects in memory when dealing with unique constraints
     result = session.execute(
         update(StatusEntry)
         .where(
@@ -60,6 +62,8 @@ def supersede_unconfirmed_drafts(session: Session, person_id: str, week_ending: 
         )
         .values(is_current=False)
     )
+    # Flush immediately to ensure partial unique index is updated before inserts
+    session.flush()
     return int(result.rowcount or 0)
 
 
@@ -323,59 +327,112 @@ def persist_edited_entries(
     Returns:
         List of newly created/updated entries
     """
-    # Get current drafts in order
+    # Get current drafts in order - access attributes BEFORE we supersede them
     current_entries = get_current_drafts(session, person_id, week_ending)
     if not current_entries:
         return []
 
-    # Supersede all current drafts
+    # Extract all data we need from current entries BEFORE modifying them
+    entry_data = []
     for entry in current_entries:
-        entry.is_current = False
+        entry_data.append({
+            'epic_key': entry.epic_key,
+            'epic_name_snapshot': entry.epic_name_snapshot,
+            'project': entry.project,
+            'state': entry.state,
+            'outcome': entry.outcome,
+            'blocker': entry.blocker,
+            'ask': entry.ask,
+            'draft_outcome': entry.draft_outcome,
+            'confidence': entry.confidence,
+            'prompt_version': entry.prompt_version,
+            'evidence': entry.evidence,
+            'extra': entry.extra,
+            'revision': entry.revision,
+            'entry_id': entry.entry_id,
+            'drafted_at': entry.drafted_at,
+        })
+
+    # Supersede all current drafts using UPDATE for immediate database-level change
+    session.execute(
+        update(StatusEntry)
+        .where(
+            StatusEntry.person_id == person_id,
+            StatusEntry.week_ending == week_ending,
+            StatusEntry.is_current.is_(True),
+            StatusEntry.confirmed_at.is_(None),
+        )
+        .values(is_current=False)
+    )
+    # Flush immediately to ensure partial unique index is updated before inserts
+    session.flush()
 
     edited_at = datetime.now(timezone.utc)
     new_entries: list[StatusEntry] = []
 
-    # Process each entry
-    for idx, entry in enumerate(current_entries):
+    # Process each entry using the extracted data
+    for idx, data in enumerate(entry_data):
         # Skip dropped entries
         if idx in dropped_indices:
             continue
 
         # Check if outcome was edited
         new_outcome = edited_outcomes.get(idx)
-        if new_outcome and new_outcome.strip() != entry.outcome.strip():
+        if new_outcome and new_outcome.strip() != data['outcome'].strip():
             # Create edited revision
             new_entry = StatusEntry(
                 week_ending=week_ending,
                 person_id=person_id,
-                epic_key=entry.epic_key,
-                epic_name_snapshot=entry.epic_name_snapshot,
-                project=entry.project,
-                state=entry.state,
+                epic_key=data['epic_key'],
+                epic_name_snapshot=data['epic_name_snapshot'],
+                project=data['project'],
+                state=data['state'],
                 outcome=new_outcome.strip(),
-                blocker=entry.blocker,
-                ask=leadership_asks if leadership_asks and leadership_asks.strip() else entry.ask,
-                draft_outcome=entry.draft_outcome,  # Preserve original draft
+                blocker=data['blocker'],
+                ask=leadership_asks if leadership_asks and leadership_asks.strip() else data['ask'],
+                draft_outcome=data['draft_outcome'],  # Preserve original draft
                 source=EntrySource.DRAFTED_EDITED.value,
-                confidence=entry.confidence,
+                confidence=data['confidence'],
                 needs_human=False,  # Human just reviewed it
-                prompt_version=entry.prompt_version,
-                evidence=entry.evidence,
-                extra=entry.extra,
-                revision=entry.revision + 1,
-                supersedes_entry_id=entry.entry_id,
+                prompt_version=data['prompt_version'],
+                evidence=data['evidence'],
+                extra=data['extra'],
+                revision=data['revision'] + 1,
+                supersedes_entry_id=data['entry_id'],
                 is_current=True,
-                drafted_at=entry.drafted_at,
+                drafted_at=data['drafted_at'],
                 confirmed_at=None,
             )
             session.add(new_entry)
             new_entries.append(new_entry)
         else:
-            # No change, keep as current but update asks if provided
-            entry.is_current = True
-            if leadership_asks and leadership_asks.strip():
-                entry.ask = leadership_asks.strip()
-            new_entries.append(entry)
+            # No change, keep original entry as current but update asks if provided
+            # Re-create the entry with is_current=True
+            unchanged_entry = StatusEntry(
+                week_ending=week_ending,
+                person_id=person_id,
+                epic_key=data['epic_key'],
+                epic_name_snapshot=data['epic_name_snapshot'],
+                project=data['project'],
+                state=data['state'],
+                outcome=data['outcome'],
+                blocker=data['blocker'],
+                ask=leadership_asks.strip() if leadership_asks and leadership_asks.strip() else data['ask'],
+                draft_outcome=data['draft_outcome'],
+                source=EntrySource.DRAFTED.value,
+                confidence=data['confidence'],
+                needs_human=False,
+                prompt_version=data['prompt_version'],
+                evidence=data['evidence'],
+                extra=data['extra'],
+                revision=data['revision'],
+                supersedes_entry_id=None,
+                is_current=True,
+                drafted_at=data['drafted_at'],
+                confirmed_at=None,
+            )
+            session.add(unchanged_entry)
+            new_entries.append(unchanged_entry)
 
     # Add unticketed work as a new entry if provided
     if unticketed_work and unticketed_work.strip():

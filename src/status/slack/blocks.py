@@ -315,3 +315,110 @@ def build_edit_modal(
     }
 
     return modal
+
+
+def build_regenerate_modal(
+    *,
+    person_id: str,
+    week_ending: date,
+) -> dict[str, Any]:
+    """Build a Slack modal for regenerating draft status entries.
+
+    User selects a reason for regeneration, then we re-run the drafter skill.
+    """
+    modal = {
+        "type": "modal",
+        "callback_id": "regenerate_status_modal",
+        "private_metadata": json.dumps({
+            "person_id": person_id,
+            "week_ending": week_ending.isoformat(),
+        }),
+        "title": {
+            "type": "plain_text",
+            "text": "Regenerate Draft",
+        },
+        "submit": {
+            "type": "plain_text",
+            "text": "Regenerate",
+        },
+        "close": {
+            "type": "plain_text",
+            "text": "Cancel",
+        },
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "Why do you want to regenerate this draft?",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "regenerate_reason",
+                "label": {
+                    "type": "plain_text",
+                    "text": "Reason",
+                },
+                "element": {
+                    "type": "static_select",
+                    "action_id": "reason_select",
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "Select a reason",
+                    },
+                    "options": [
+                        {
+                            "text": {"type": "plain_text", "text": "Draft missed important work"},
+                            "value": "missed_work",
+                        },
+                        {
+                            "text": {"type": "plain_text", "text": "Epic grouping is wrong"},
+                            "value": "wrong_grouping",
+                        },
+                        {
+                            "text": {"type": "plain_text", "text": "Outcomes are inaccurate"},
+                            "value": "inaccurate",
+                        },
+                        {
+                            "text": {"type": "plain_text", "text": "New Jira/GitHub activity since draft"},
+                            "value": "new_activity",
+                        },
+                        {
+                            "text": {"type": "plain_text", "text": "Other"},
+                            "value": "other",
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "regenerate_notes",
+                "label": {
+                    "type": "plain_text",
+                    "text": "Additional notes (optional)",
+                },
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "notes_value",
+                    "multiline": True,
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "Any specific guidance for the regeneration...",
+                    },
+                },
+                "optional": True,
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "⚠️ This will discard your current draft and create a new one from fresh data.",
+                    }
+                ],
+            },
+        ],
+    }
+
+    return modal

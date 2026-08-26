@@ -24,6 +24,7 @@ from status.slack.blocks import (
     ACTION_REGENERATE,
     build_draft_blocks,
     build_edit_modal,
+    build_regenerate_modal,
     draft_fallback_text,
 )
 from status.slack.send import send_status_review
@@ -196,12 +197,42 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
 
     @app.action(ACTION_REGENERATE)
     def on_regenerate(ack: Any, body: dict[str, Any], client: Any) -> None:
+        """Open the regenerate modal when user clicks Regenerate button."""
         ack()
-        client.chat_postEphemeral(
-            channel=body["channel"]["id"],
-            user=body["user"]["id"],
-            text="Regenerate flow is coming in the next milestone.",
-        )
+        log.info("=== Regenerate button clicked ===")
+
+        try:
+            action = body["actions"][0]
+            person_id, week_ending = parse_action_value(action["value"])
+            trigger_id = body.get("trigger_id")
+
+            log.info(f"Regenerate request: person={person_id}, week={week_ending}")
+
+            if not trigger_id:
+                log.error("No trigger_id found!")
+                client.chat_postEphemeral(
+                    channel=body["channel"]["id"],
+                    user=body["user"]["id"],
+                    text="Missing trigger ID. Cannot open modal.",
+                )
+                return
+
+            # Build and open regenerate modal
+            modal = build_regenerate_modal(
+                person_id=person_id,
+                week_ending=week_ending,
+            )
+
+            response = client.views_open(trigger_id=trigger_id, view=modal)
+            log.info(f"Regenerate modal opened: ok={response.get('ok')}")
+
+        except Exception as e:
+            log.exception(f"Failed to open regenerate modal: {type(e).__name__}: {str(e)}")
+            client.chat_postEphemeral(
+                channel=body["channel"]["id"],
+                user=body["user"]["id"],
+                text=f"Error: {type(e).__name__}: {str(e)[:100]}",
+            )
 
     @app.view("edit_status_modal")
     def handle_edit_submission(ack: Any, body: dict[str, Any], view: dict[str, Any], client: Any) -> None:
@@ -313,6 +344,107 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
                 client.chat_postMessage(
                     channel=channel_id,
                     text=f"❌ Error saving changes: {str(e)[:200]}",
+                )
+            except Exception:
+                log.exception("Could not send error message")
+
+    @app.view("regenerate_status_modal")
+    def handle_regenerate_submission(ack: Any, body: dict[str, Any], view: dict[str, Any], client: Any) -> None:
+        """Handle modal submission when user regenerates status."""
+        ack()
+        log.info("=== Regenerate modal submitted ===")
+
+        try:
+            # Parse metadata
+            metadata = json.loads(view["private_metadata"])
+            person_id = metadata["person_id"]
+            week_ending = date.fromisoformat(metadata["week_ending"])
+            slack_user_id = body["user"]["id"]
+
+            log.info(f"Processing regenerate request: person={person_id}, week={week_ending}")
+
+            # Extract form values
+            values = view["state"]["values"]
+
+            # Get reason
+            reason_block = values.get("regenerate_reason")
+            reason = None
+            if reason_block:
+                selected = reason_block["reason_select"].get("selected_option")
+                if selected:
+                    reason = selected["value"]
+
+            # Get optional notes
+            notes = None
+            notes_block = values.get("regenerate_notes")
+            if notes_block:
+                notes = notes_block["notes_value"].get("value")
+
+            log.info(f"Regenerate reason: {reason}, has_notes: {bool(notes)}")
+
+            # Import collector and drafter functions
+            from status.collectors import run_collect
+            from status.skills.drafter import draft_and_persist
+
+            # Re-collect data
+            log.info("Re-collecting activity data...")
+            payload = run_collect(person_id, week_ending)
+
+            # If user provided notes, add to collection errors so drafter sees them
+            collection_errors = list(payload.get("collection_errors") or [])
+            if notes and notes.strip():
+                collection_errors.append(f"User regeneration note: {notes.strip()}")
+                payload["collection_errors"] = collection_errors
+
+            # Re-run drafter
+            log.info("Re-running drafter...")
+            result = draft_and_persist(payload, dry_run=False, persist=True)
+
+            log.info(f"Regenerated {len(result.persisted_entry_ids)} entries, superseded {result.superseded_count}")
+
+            # Send updated draft message
+            log.info("Sending regenerated draft message...")
+            from status.slack.send import send_status_review
+            send_result = send_status_review(
+                person_id,
+                week_ending,
+                bot_token=bot_token,
+                confirmed=False,
+            )
+
+            log.info(f"Regenerated draft sent: channel={send_result.get('channel')}, ts={send_result.get('ts')}")
+
+            # Send confirmation message
+            try:
+                dm_response = client.conversations_open(users=[slack_user_id])
+                channel_id = dm_response["channel"]["id"]
+
+                reason_text = {
+                    "missed_work": "Draft missed important work",
+                    "wrong_grouping": "Epic grouping was wrong",
+                    "inaccurate": "Outcomes were inaccurate",
+                    "new_activity": "New Jira/GitHub activity since draft",
+                    "other": "Other reason",
+                }.get(reason, "Unknown reason")
+
+                client.chat_postMessage(
+                    channel=channel_id,
+                    text=f"✅ *Draft regenerated!* {len(result.persisted_entry_ids)} entries created from fresh data. Reason: {reason_text}",
+                )
+                log.info("Confirmation message sent")
+            except Exception:
+                log.exception("Could not send confirmation message after regenerate")
+
+        except Exception as e:
+            log.exception(f"Failed to process regenerate submission: {type(e).__name__}: {str(e)}")
+            # Modal is already closed, can't show error in modal
+            # Send DM with error
+            try:
+                dm_response = client.conversations_open(users=[slack_user_id])
+                channel_id = dm_response["channel"]["id"]
+                client.chat_postMessage(
+                    channel=channel_id,
+                    text=f"❌ Error regenerating draft: {str(e)[:200]}",
                 )
             except Exception:
                 log.exception("Could not send error message")
