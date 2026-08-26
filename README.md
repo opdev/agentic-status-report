@@ -6,6 +6,9 @@ ledger, and synthesize a management report.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the full design.
 
+For local setup, Postgres, env vars, and the collect → draft → send dev loop, see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
 ## Quick start
 
 ```bash
@@ -45,6 +48,7 @@ Deploy the Slack Socket Mode bot to OpenShift — no ingress required. See
 ```
 skills/           Claude Agent Skill definitions
 src/status/       Python pipeline
+docs/             Design and development guides
 alembic/          Database migrations
 deploy/           Dockerfile and OpenShift manifests
 fixtures/         Saved collector payloads for offline testing
