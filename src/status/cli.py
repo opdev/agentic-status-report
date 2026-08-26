@@ -13,7 +13,7 @@ from status.collectors import run_collect
 from status.config import SKILLS_DIR, get_settings
 from status.db import get_session
 from status.skills.client import SkillClient
-from status.skills.drafter import draft_and_persist, load_fixture, run_drafter
+from status.skills.drafter import DraftPersistError, draft_and_persist, load_fixture, run_drafter
 from status.skills.synthesizer import run_synthesizer
 
 app = typer.Typer(no_args_is_help=True, help="Weekly status pipeline CLI")
@@ -83,7 +83,11 @@ def draft(
     _dry_run_flag(dry_run)
 
     if fixture is not None:
-        payload = load_fixture(fixture)
+        try:
+            payload = load_fixture(fixture)
+        except FileNotFoundError as exc:
+            console.print(f"[red]{exc}[/]")
+            raise typer.Exit(1) from exc
     elif person and week:
         payload = run_collect(person, _parse_week(week))
     else:
@@ -95,7 +99,11 @@ def draft(
         console.print_json(result.model_dump_json(indent=2))
         return
 
-    run_result = draft_and_persist(payload, dry_run=False, persist=True)
+    try:
+        run_result = draft_and_persist(payload, dry_run=False, persist=True)
+    except DraftPersistError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from exc
 
     output = run_result.draft.model_dump()
     output["prompt_version"] = run_result.prompt_version

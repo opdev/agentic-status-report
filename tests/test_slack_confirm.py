@@ -27,7 +27,39 @@ def test_format_entry_text_includes_state_and_outcome() -> None:
     )
     text = format_entry_text(entry)
     assert "In progress" in text
+    assert "EET-5493" in text
+    assert "OpenShift Cluster Management Bot" in text
     assert "Shipped destroy command." in text
+
+
+def test_build_draft_blocks_lists_entries_before_flags() -> None:
+    entry = StatusEntry(
+        entry_id=uuid4(),
+        week_ending=date(2026, 8, 14),
+        person_id="pilot",
+        epic_key="EET-5519",
+        epic_name_snapshot="Agentic Weekly Status Pipeline",
+        project="EET",
+        state="shipped",
+        outcome="Shipped M1.",
+        source="drafted",
+    )
+    flag = MagicMock(message="Gap note.")
+    blocks = build_draft_blocks(
+        person_id="pilot",
+        display_name="Pilot User",
+        week_ending=date(2026, 8, 14),
+        entries=[entry],
+        flags=[flag],
+    )
+    section_texts = [
+        block["text"]["text"]
+        for block in blocks
+        if block.get("type") == "section" and "text" in block
+    ]
+    entry_index = next(i for i, text in enumerate(section_texts) if "EET-5519" in text)
+    flag_index = next(i for i, text in enumerate(section_texts) if "Gap note." in text)
+    assert entry_index < flag_index
 
 
 def test_build_draft_blocks_includes_confirm_button() -> None:

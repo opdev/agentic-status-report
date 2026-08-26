@@ -12,6 +12,7 @@ class DraftEntry(BaseModel):
     state: Literal["shipped", "progressing", "slipped", "blocked", "quiet"]
     outcome: str
     evidence: list[str] = Field(min_length=1)
+    evidence_labels: dict[str, str] = Field(default_factory=dict)
     blocker: str | None = None
     ask: str | None = None
     confidence: Literal["high", "medium", "low"]

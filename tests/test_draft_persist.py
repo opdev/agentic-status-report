@@ -3,24 +3,63 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from unittest.mock import MagicMock
 
-from status.db.draft import persist_draft_output, supersede_unconfirmed_drafts
+from status.db.draft import (
+    dedupe_draft_entries,
+    persist_draft_output,
+    supersede_current_drafts,
+    supersede_unconfirmed_drafts,
+)
 from status.skills.schemas import DraftEntry, DraftOutput
+
+
+def test_dedupe_draft_entries_keeps_last_per_epic() -> None:
+    first = DraftEntry(
+        project="EET",
+        epic_key="EET-5519",
+        epic_name="Pipeline",
+        state="progressing",
+        outcome="First draft.",
+        evidence=["EET-5520"],
+        confidence="high",
+    )
+    second = DraftEntry(
+        project="EET",
+        epic_key="EET-5519",
+        epic_name="Pipeline",
+        state="shipped",
+        outcome="Second draft.",
+        evidence=["EET-5521"],
+        confidence="high",
+    )
+    deduped = dedupe_draft_entries([first, second])
+    assert len(deduped) == 1
+    assert deduped[0].outcome == "Second draft."
 
 
 def test_supersede_unconfirmed_drafts_marks_rows_not_current() -> None:
     session = MagicMock()
-    row = MagicMock(is_current=True, confirmed_at=None)
-    session.scalars.return_value.all.return_value = [row]
+    session.execute.return_value.rowcount = 2
 
     count = supersede_unconfirmed_drafts(session, "pilot", date(2026, 8, 14))
 
-    assert count == 1
-    assert row.is_current is False
+    assert count == 2
+    session.execute.assert_called_once()
+
+
+def test_supersede_current_drafts_includes_confirmed_rows() -> None:
+    session = MagicMock()
+    session.execute.return_value.rowcount = 3
+
+    count = supersede_current_drafts(session, "pilot", date(2026, 8, 14))
+
+    assert count == 3
+    session.execute.assert_called_once()
 
 
 def test_persist_draft_output_creates_status_entries() -> None:
     session = MagicMock()
     session.get.return_value = None
+    session.execute.return_value.rowcount = 0
     session.scalars.return_value.first.return_value = None
     session.scalars.return_value.all.return_value = []
 

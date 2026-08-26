@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 
 from status.collectors.github import GitHubCollectorError, collect_github_activity
-from status.collectors.jira import JiraCollectorError, collect_jira_activity
+from status.collectors.jira import JiraCollectorError, collect_jira_activity, filter_person_jira_issues
 from status.collectors.payload import build_payload, week_bounds
 from status.collectors.person import PersonContext, resolve_person
 from status.config import get_settings
@@ -78,6 +78,7 @@ def run_collect(
     if person.jira_account_id:
         try:
             jira_issues = collect_jira_activity(person.jira_account_id, week_start, week_end)
+            jira_issues = filter_person_jira_issues(jira_issues, person.jira_account_id)
         except JiraCollectorError as exc:
             errors.append(f"jira: {exc}")
             log.error("jira collection failed for %s: %s", person.person_id, exc)

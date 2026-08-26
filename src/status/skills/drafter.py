@@ -10,21 +10,35 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from status.config import get_settings
 from status.db import get_session
 from status.db.draft import persist_draft_output
 from status.skills.client import SkillClient, SkillError, SkillRef
-from status.skills.schemas import DraftOutput
+from status.skills.evidence import (
+    MILESTONE_ONLY_RE,
+    build_evidence_labels,
+    filter_evidence_to_payload,
+    inject_markdown_links,
+    issue_summary_index,
+    outcome_from_linked_evidence,
+    payload_jira_keys,
+)
+from status.skills.schemas import DraftEntry, DraftOutput
 
 log = logging.getLogger(__name__)
 
 DRAFTER_INSTRUCTION = (
     "Use the weekly-status-drafter skill on the payload below. "
-    "Return only the JSON output defined in the skill as plain text in your reply."
+    "Return only the JSON output defined in the skill as plain text in your reply. "
+    "Use markdown links [text](url) in outcome fields for Jira and GitHub evidence."
 )
+
+
+class DraftPersistError(RuntimeError):
+    """Raised when draft rows cannot be written to the ledger."""
 
 
 @dataclass(frozen=True)
@@ -36,7 +50,16 @@ class DraftRunResult:
 
 
 def load_fixture(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text())
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(
+            f"Fixture not found: {resolved}\n"
+            "Create one with:\n"
+            "  status collect --person <id> --week YYYY-MM-DD "
+            "--save-fixture fixtures/payload.json\n"
+            "Or omit --fixture and pass --person and --week to collect live."
+        )
+    return json.loads(resolved.read_text(encoding="utf-8"))
 
 
 def week_ending_from_payload(payload: dict[str, Any]) -> date:
@@ -71,6 +94,75 @@ def _normalize_draft(draft: DraftOutput, payload: dict[str, Any]) -> DraftOutput
     )
 
 
+def attach_evidence_labels(draft: DraftOutput, payload: dict[str, Any]) -> DraftOutput:
+    """Fill per-key link phrases from collector Jira summaries."""
+    summaries = issue_summary_index(list(payload.get("jira_issues") or []))
+    if not summaries:
+        return draft
+
+    enriched: list[DraftEntry] = []
+    for entry in draft.entries:
+        labels = build_evidence_labels(
+            entry.evidence,
+            summaries,
+            epic_key=entry.epic_key,
+            epic_name=entry.epic_name,
+        )
+        if labels == entry.evidence_labels:
+            enriched.append(entry)
+        else:
+            enriched.append(entry.model_copy(update={"evidence_labels": labels}))
+    return draft.model_copy(update={"entries": enriched})
+
+
+def postprocess_draft(draft: DraftOutput, payload: dict[str, Any]) -> DraftOutput:
+    """Filter evidence to this person's payload and enrich outcomes with Jira links."""
+    settings = get_settings()
+    jira_base_url = settings.jira_base_url or "https://redhat.atlassian.net"
+    allowed_keys = payload_jira_keys(payload)
+    processed: list[DraftEntry] = []
+
+    for entry in draft.entries:
+        evidence = filter_evidence_to_payload(
+            entry.evidence,
+            allowed_jira_keys=allowed_keys,
+            pull_requests=list(payload.get("pull_requests") or []),
+            commits=list(payload.get("commits") or []),
+        )
+        labels = {
+            key: label
+            for key, label in entry.evidence_labels.items()
+            if key in allowed_keys
+        }
+        outcome = entry.outcome
+        if MILESTONE_ONLY_RE.search(outcome) and "[" not in outcome:
+            rewritten = outcome_from_linked_evidence(
+                entry.state,
+                evidence,
+                labels,
+                jira_base_url=jira_base_url,
+            )
+            if rewritten:
+                outcome = rewritten
+        outcome = inject_markdown_links(outcome, labels, jira_base_url=jira_base_url)
+
+        updates: dict[str, Any] = {
+            "evidence": evidence,
+            "evidence_labels": labels,
+            "outcome": outcome,
+        }
+        if len(evidence) < len(entry.evidence):
+            updates["needs_human"] = True
+            if not entry.why_flagged:
+                updates["why_flagged"] = (
+                    "Some cited tickets were removed because they are not assigned to you "
+                    "or were not in this week's collector data — OK to keep?"
+                )
+        processed.append(entry.model_copy(update=updates))
+
+    return draft.model_copy(update={"entries": processed})
+
+
 def run_drafter(payload: dict[str, Any], *, dry_run: bool = False) -> DraftOutput:
     settings = get_settings()
     if dry_run or not settings.drafter_skill_id:
@@ -93,7 +185,9 @@ def run_drafter(payload: dict[str, Any], *, dry_run: bool = False) -> DraftOutpu
         try:
             result = client.invoke_json(skill, payload, DRAFTER_INSTRUCTION, DraftOutput)
             assert isinstance(result, DraftOutput)
-            return _normalize_draft(result, payload)
+            normalized = _normalize_draft(result, payload)
+            labeled = attach_evidence_labels(normalized, payload)
+            return postprocess_draft(labeled, payload)
         except SkillError as exc:
             last_error = exc
             log.warning("drafter attempt %s failed: %s", attempt + 1, exc)
@@ -136,6 +230,13 @@ def _persist_with_retry(
                 retry_delay_seconds,
             )
             time.sleep(retry_delay_seconds)
+        except IntegrityError as exc:
+            raise DraftPersistError(
+                "Could not save draft entries — a current row already exists for one "
+                "or more epics this week. Re-run `status draft`; if this persists, "
+                "check for stale is_current rows in Postgres. "
+                f"Details: {exc.orig}"
+            ) from exc
 
     assert last_error is not None
     raise last_error
@@ -170,12 +271,18 @@ def draft_and_persist(
 
     collection_errors = list(payload.get("collection_errors") or [])
     if session is not None:
-        rows, superseded_count = persist_draft_output(
-            session,
-            draft,
-            prompt_version=prompt_version,
-            collection_errors=collection_errors,
-        )
+        try:
+            rows, superseded_count = persist_draft_output(
+                session,
+                draft,
+                prompt_version=prompt_version,
+                collection_errors=collection_errors,
+            )
+        except IntegrityError as exc:
+            raise DraftPersistError(
+                "Could not save draft entries — a current row already exists for one "
+                "or more epics this week. Re-run `status draft` after resolving the conflict."
+            ) from exc
         persisted_entry_ids = [str(row.entry_id) for row in rows]
     else:
         persisted_entry_ids, superseded_count = _persist_with_retry(
