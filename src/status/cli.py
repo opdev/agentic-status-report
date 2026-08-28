@@ -42,8 +42,8 @@ def collect(
         Optional[Path], typer.Option("--save-fixture", help="Write payload JSON to this path")
     ] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Skip external API calls")] = False,
-    jira_account: Annotated[
-        Optional[str], typer.Option("--jira-account", help="Override Jira account id")
+    jira_email: Annotated[
+        Optional[str], typer.Option("--jira-email", help="Override Jira email for JQL")
     ] = None,
     github_login: Annotated[
         Optional[str], typer.Option("--github-login", help="Override GitHub login")
@@ -57,7 +57,7 @@ def collect(
         week_ending,
         save_fixture=save_fixture,
         dry_run=dry_run,
-        jira_account_id=jira_account,
+        jira_email=jira_email,
         github_login=github_login,
     )
     console.print_json(json.dumps(payload, indent=2))

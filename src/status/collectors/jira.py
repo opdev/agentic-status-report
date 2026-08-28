@@ -14,7 +14,6 @@ from status.config import Settings, get_settings
 log = logging.getLogger(__name__)
 
 ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
-ACCOUNT_ID_RE = re.compile(r"^\d+:[0-9a-f-]+$|^[0-9a-f]{24}$", re.IGNORECASE)
 
 
 class JiraCollectorError(RuntimeError):
@@ -107,7 +106,7 @@ def _comments_in_window(
     week_start: date,
     week_end: date,
     *,
-    author_account_id: str | None = None,
+    author_email: str | None = None,
 ) -> list[dict[str, str]]:
     comments: list[dict[str, str]] = []
     comment_block = fields.get("comment", {})
@@ -116,8 +115,10 @@ def _comments_in_window(
         if not _in_window(created, week_start, week_end):
             continue
         author = comment.get("author", {})
-        if author_account_id and author.get("accountId") != author_account_id:
-            continue
+        if author_email:
+            author_addr = str(author.get("emailAddress", "")).lower()
+            if author_addr != author_email.lower():
+                continue
         comments.append(
             {
                 "author": author.get("displayName", author.get("accountId", "unknown")),
@@ -172,7 +173,7 @@ def normalize_jira_issue(
     week_start: date,
     week_end: date,
     *,
-    jira_account_id: str | None = None,
+    jira_email: str | None = None,
     epic_field: str | None = None,
 ) -> dict[str, Any]:
     fields = issue.get("fields", {})
@@ -180,14 +181,15 @@ def normalize_jira_issue(
     updated = _parse_jira_dt(fields.get("updated"))
     assignee = fields.get("assignee") or {}
     reporter = fields.get("reporter") or {}
-    assignee_account_id = assignee.get("accountId")
-    reporter_account_id = reporter.get("accountId")
+    assignee_email = str(assignee.get("emailAddress", "")).lower()
+    reporter_email = str(reporter.get("emailAddress", "")).lower()
+    person_email = jira_email.lower() if jira_email else ""
     transitions = _transitions_from_changelog(changelog, week_start, week_end)
     comments = _comments_in_window(
         fields,
         week_start,
         week_end,
-        author_account_id=jira_account_id,
+        author_email=jira_email,
     )
 
     return {
@@ -198,11 +200,10 @@ def normalize_jira_issue(
         "epic_key": epic_key,
         "epic_name": epic_name,
         "project": fields.get("project", {}).get("key", ""),
-        "assignee_account_id": assignee_account_id,
         "assignee_display_name": assignee.get("displayName"),
-        "reporter_account_id": reporter_account_id,
-        "is_assignee": bool(jira_account_id and assignee_account_id == jira_account_id),
-        "is_reporter": bool(jira_account_id and reporter_account_id == jira_account_id),
+        "reporter_display_name": reporter.get("displayName"),
+        "is_assignee": bool(person_email and assignee_email == person_email),
+        "is_reporter": bool(person_email and reporter_email == person_email),
         "transitions": transitions,
         "comments": comments,
         "last_updated": updated.isoformat() if updated else fields.get("updated", ""),
@@ -211,7 +212,7 @@ def normalize_jira_issue(
 
 
 def build_jql(
-    jira_account_id: str,
+    jira_email: str,
     week_start: date,
     week_end: date,
     *,
@@ -220,28 +221,18 @@ def build_jql(
     start = week_start.isoformat()
     end = week_end.isoformat()
 
-    if jira_account_id in {"currentUser", "me"}:
+    if jira_email in {"currentUser", "me"}:
         person_clauses = [
             "assignee = currentUser()",
             "reporter = currentUser()",
             "watcher = currentUser()",
             "worklogAuthor = currentUser()",
         ]
-    elif ACCOUNT_ID_RE.match(jira_account_id):
-        # Red Hat EET tickets often list involvement via Developer / Contributors fields.
-        person_clauses = [
-            f'assignee = "{jira_account_id}"',
-            f'reporter = "{jira_account_id}"',
-            f'watcher = "{jira_account_id}"',
-            f'worklogAuthor = "{jira_account_id}"',
-            f'"Developer" = "{jira_account_id}"',
-            f'"Contributors" = "{jira_account_id}"',
-        ]
     else:
         # Email works for assignee/reporter on Red Hat Jira; commentedBy() does not.
         person_clauses = [
-            f'assignee = "{jira_account_id}"',
-            f'reporter = "{jira_account_id}"',
+            f'assignee = "{jira_email}"',
+            f'reporter = "{jira_email}"',
         ]
 
     activity = "(" + " OR ".join(person_clauses) + ")"
@@ -290,7 +281,7 @@ def check_project_access(
 
 
 def collect_jira_activity(
-    jira_account_id: str,
+    jira_email: str,
     week_start: date,
     week_end: date,
     *,
@@ -300,7 +291,7 @@ def collect_jira_activity(
     headers = _auth_header(settings)
     base = settings.jira_base_url.rstrip("/")
     jql = build_jql(
-        jira_account_id,
+        jira_email,
         week_start,
         week_end,
         projects=settings.jira_project_list or None,
@@ -374,7 +365,7 @@ def collect_jira_activity(
                 changelog,
                 week_start,
                 week_end,
-                jira_account_id=jira_account_id,
+                jira_email=jira_email,
                 epic_field=settings.jira_epic_field,
             )
         )
@@ -384,10 +375,10 @@ def collect_jira_activity(
 
 def filter_person_jira_issues(
     issues: list[dict[str, Any]],
-    jira_account_id: str | None,
+    jira_email: str | None,
 ) -> list[dict[str, Any]]:
     """Drop issues where the person is only a watcher on someone else's ticket."""
-    if not jira_account_id or not ACCOUNT_ID_RE.match(jira_account_id):
+    if not jira_email:
         return issues
 
     kept: list[dict[str, Any]] = []
@@ -401,7 +392,7 @@ def filter_person_jira_issues(
                 "dropping %s — assignee is %s, not %s",
                 issue.get("key"),
                 issue.get("assignee_display_name"),
-                jira_account_id,
+                jira_email,
             )
     return kept
 

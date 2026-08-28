@@ -71,16 +71,14 @@ DATABASE_URL=postgresql+psycopg://localhost/weekly_status
 JIRA_BASE_URL=https://redhat.atlassian.net
 JIRA_EMAIL=you@redhat.com
 JIRA_API_TOKEN=                    # Atlassian API token
-JIRA_ACCOUNT_ID=                   # Atlassian account id (not email)
 JIRA_PROJECTS=EET                  # comma-separated project keys
 
 GITHUB_TOKEN=                      # classic or fine-grained PAT
 GITHUB_LOGIN=your-github-login
 ```
 
-`JIRA_ACCOUNT_ID` is the assignee id Jira uses in JQL. Find it in your Atlassian
-profile URL or from a test Jira API call. If unset, collection falls back to
-`JIRA_EMAIL`, which may not match assignee fields on Red Hat Jira.
+Jira collection uses `JIRA_EMAIL` for assignee/reporter JQL. Override per run with
+`status collect --jira-email` when needed.
 
 ### Draft (Claude hosted skill)
 
@@ -206,18 +204,16 @@ requires `slack_user_id`.
 
 ```bash
 psql "${DATABASE_URL/postgresql+psycopg/postgresql}" <<'SQL'
-INSERT INTO person (person_id, display_name, slack_user_id, jira_account_id, github_login)
+INSERT INTO person (person_id, display_name, slack_user_id, github_login)
 VALUES (
   'yoza',
   'Yash Oza',
   'U01234567',              -- Slack member ID (Profile → ⋮ → Copy member ID)
-  '712020:xxxxxxxx-xxxx',   -- Jira account id
   'yoza'                    -- GitHub login
 )
 ON CONFLICT (person_id) DO UPDATE SET
   display_name   = EXCLUDED.display_name,
   slack_user_id  = EXCLUDED.slack_user_id,
-  jira_account_id = EXCLUDED.jira_account_id,
   github_login   = EXCLUDED.github_login;
 SQL
 ```
@@ -226,8 +222,9 @@ SQL
 |--------|------------------|
 | `person_id` | Short handle used in CLI (`-p yoza`) |
 | `slack_user_id` | Slack profile → copy member ID (`U…` / `W…`) |
-| `jira_account_id` | Atlassian account id for JQL assignee |
 | `github_login` | GitHub username for commit/PR search |
+
+Set `JIRA_EMAIL` in `.env` (or pass `--jira-email` on collect) for Jira activity.
 
 `status draft` will auto-create a minimal `person` row on first persist if one
 does not exist, but **without** `slack_user_id` — `status send` will fail until
@@ -358,7 +355,7 @@ status slack run
 | `persisted_entry_ids` empty / persist error | DB URL wrong or unique constraint | Check `DATABASE_URL`; re-run `status draft` |
 | `unknown person` on send | no `person` row | Insert into `person` (§5) |
 | `has no slack_user_id` | person row incomplete | Update `slack_user_id` in Postgres |
-| Collect returns empty Jira | wrong `JIRA_ACCOUNT_ID` or project scope | Verify assignee id and `JIRA_PROJECTS` |
+| Collect returns empty Jira | wrong `JIRA_EMAIL` or project scope | Verify email and `JIRA_PROJECTS` |
 | Draft flags only, no entries | skill parse failure or empty payload | Re-run draft; check Anthropic key and `DRAFTER_SKILL_ID` |
 | Slack send succeeds but no DM | bot not in workspace or wrong user id | Reinstall app; verify `slack_user_id` |
 

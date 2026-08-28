@@ -70,8 +70,4 @@ def get_previous_confirmed_entries(
 
 
 def get_person(session: Session, person_id: str) -> Person | None:
-    row = session.get(Person, person_id)
-    if row:
-        return row
-    stmt = select(Person).where(Person.jira_account_id == person_id)
-    return session.scalars(stmt).first()
+    return session.get(Person, person_id)
