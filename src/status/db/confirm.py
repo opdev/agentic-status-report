@@ -57,6 +57,37 @@ def latest_confirmed_week(session: Session, person_id: str) -> date | None:
     return session.scalars(stmt).first()
 
 
+def record_regeneration(
+    session: Session,
+    person_id: str,
+    week_ending: date,
+    *,
+    reason: str,
+    notes: str | None = None,
+) -> Participation:
+    """Record that the user regenerated their draft for this week."""
+    now = datetime.now(timezone.utc)
+    row = session.get(Participation, (person_id, week_ending))
+    if row is None:
+        row = Participation(
+            person_id=person_id,
+            week_ending=week_ending,
+            status="sent",
+            draft_sent_at=now,
+        )
+        session.add(row)
+
+    row.regenerated = True
+    reason_text = reason
+    if notes and notes.strip():
+        reason_text = f"{reason}: {notes.strip()}"
+    row.regenerate_reason = reason_text
+    if notes and notes.strip():
+        row.note = notes.strip()
+    session.flush()
+    return row
+
+
 def record_draft_sent(session: Session, person_id: str, week_ending: date) -> Participation:
     now = datetime.now(timezone.utc)
     row = session.get(Participation, (person_id, week_ending))
