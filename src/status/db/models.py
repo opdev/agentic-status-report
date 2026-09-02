@@ -62,7 +62,6 @@ class Person(Base):
     person_id: Mapped[str] = mapped_column(Text, primary_key=True)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     slack_user_id: Mapped[str | None] = mapped_column(Text, unique=True)
-    jira_account_id: Mapped[str | None] = mapped_column(Text, unique=True)
     github_login: Mapped[str | None] = mapped_column(Text)
     manager_id: Mapped[str | None] = mapped_column(Text, ForeignKey("person.person_id"))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")

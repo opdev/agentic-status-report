@@ -379,8 +379,8 @@ Use this flow to validate M3 end-to-end on a laptop:
 2. **Postgres** — `alembic upgrade head`; insert person with `slack_user_id`:
 
    ```sql
-   INSERT INTO person (person_id, display_name, slack_user_id, jira_account_id, github_login)
-   VALUES ('pilot', 'Pilot User', 'UXXXXXXXX', '<jira-account-id>', 'pilot-user');
+   INSERT INTO person (person_id, display_name, slack_user_id, github_login)
+   VALUES ('pilot', 'Pilot User', 'UXXXXXXXX', 'pilot-user');
    ```
 
    Slack member ID: profile → ⋮ → **Copy member ID**.

@@ -135,11 +135,10 @@ Use the same user/password from the PGO secret:
 
 ```bash
 psql "postgresql://weeklystatus:<password>@localhost:5432/weekly_status" <<'SQL'
-INSERT INTO person (person_id, display_name, slack_user_id, jira_account_id, github_login)
-VALUES ('pilot', 'Pilot User', 'UXXXXXXXX', '<jira-account-id>', 'pilot-user')
+INSERT INTO person (person_id, display_name, slack_user_id, github_login)
+VALUES ('pilot', 'Pilot User', 'UXXXXXXXX', 'pilot-user')
 ON CONFLICT (person_id) DO UPDATE SET
   slack_user_id = EXCLUDED.slack_user_id,
-  jira_account_id = EXCLUDED.jira_account_id,
   github_login = EXCLUDED.github_login;
 SQL
 ```

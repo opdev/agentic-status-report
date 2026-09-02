@@ -30,11 +30,6 @@ class Settings(BaseSettings):
     )
     jira_email: str | None = Field(default=None, alias="JIRA_EMAIL")
     jira_api_token: str | None = Field(default=None, alias="JIRA_API_TOKEN")
-    jira_account_id: str | None = Field(
-        default=None,
-        alias="JIRA_ACCOUNT_ID",
-        description="Atlassian account id (712020:uuid). Preferred over email for JQL.",
-    )
     jira_projects: str = Field(
         default="EET",
         alias="JIRA_PROJECTS",

@@ -10,7 +10,7 @@ from pathlib import Path
 from status.collectors.github import GitHubCollectorError, collect_github_activity
 from status.collectors.jira import JiraCollectorError, collect_jira_activity, filter_person_jira_issues
 from status.collectors.payload import build_payload, week_bounds
-from status.collectors.person import PersonContext, resolve_person
+from status.collectors.person import resolve_person
 from status.config import get_settings
 from status.db import get_session
 from status.db.repo import get_previous_confirmed_entries
@@ -24,17 +24,23 @@ def run_collect(
     *,
     save_fixture: Path | None = None,
     dry_run: bool = False,
-    jira_account_id: str | None = None,
+    jira_email: str | None = None,
     github_login: str | None = None,
 ) -> dict:
     week_start, week_end = week_bounds(week_ending)
     errors: list[str] = []
 
+    settings = get_settings()
+    if jira_email is None:
+        jira_email = settings.jira_email
+    if github_login is None and settings.github_login:
+        github_login = settings.github_login
+
     if dry_run:
         person = resolve_person(
             person_id,
             None,
-            jira_account_id=jira_account_id,
+            jira_email=jira_email,
             github_login=github_login,
         )
         payload = build_payload(person.person_id, week_ending, [], [], [])
@@ -42,19 +48,13 @@ def run_collect(
             _write_fixture(save_fixture, payload)
         return payload
 
-    settings = get_settings()
-    if jira_account_id is None:
-        jira_account_id = settings.jira_account_id or settings.jira_email
-    if github_login is None and settings.github_login:
-        github_login = settings.github_login
-
     previous_entries: list[dict] = []
     try:
         with get_session() as session:
             person = resolve_person(
                 person_id,
                 session,
-                jira_account_id=jira_account_id,
+                jira_email=jira_email,
                 github_login=github_login,
             )
             previous_entries = get_previous_confirmed_entries(
@@ -67,7 +67,7 @@ def run_collect(
         person = resolve_person(
             person_id,
             None,
-            jira_account_id=jira_account_id,
+            jira_email=jira_email,
             github_login=github_login,
         )
 
@@ -75,10 +75,10 @@ def run_collect(
     pull_requests: list[dict] = []
     commits: list[dict] = []
 
-    if person.jira_account_id:
+    if person.jira_email:
         try:
-            jira_issues = collect_jira_activity(person.jira_account_id, week_start, week_end)
-            jira_issues = filter_person_jira_issues(jira_issues, person.jira_account_id)
+            jira_issues = collect_jira_activity(person.jira_email, week_start, week_end)
+            jira_issues = filter_person_jira_issues(jira_issues, person.jira_email)
         except JiraCollectorError as exc:
             errors.append(f"jira: {exc}")
             log.error("jira collection failed for %s: %s", person.person_id, exc)
@@ -86,7 +86,7 @@ def run_collect(
             errors.append(f"jira: {exc}")
             log.exception("unexpected jira error for %s", person.person_id)
     else:
-        errors.append("jira: no account id for person")
+        errors.append("jira: JIRA_EMAIL not configured")
 
     if person.github_login:
         try:

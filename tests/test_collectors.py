@@ -13,17 +13,16 @@ from status.collectors.payload import build_payload
 from status.collectors.jira import build_jql, filter_person_jira_issues, normalize_jira_issue
 
 
-def test_build_jql_email_skips_commented_by() -> None:
+def test_build_jql_email_uses_assignee_and_reporter() -> None:
     jql = build_jql("user@example.com", date(2026, 8, 8), date(2026, 8, 14))
     assert "commentedBy" not in jql
     assert 'assignee = "user@example.com"' in jql
     assert 'reporter = "user@example.com"' in jql
+    assert "Developer" not in jql
 
 
-def test_build_jql_account_id_includes_contributor_fields() -> None:
-    jql = build_jql("712020:abc-def", date(2026, 8, 8), date(2026, 8, 14), projects=["EET"])
-    assert "Developer" in jql
-    assert "Contributors" in jql
+def test_build_jql_scopes_projects() -> None:
+    jql = build_jql("user@example.com", date(2026, 8, 8), date(2026, 8, 14), projects=["EET"])
     assert "project in (EET)" in jql
 
 
@@ -39,7 +38,11 @@ def test_normalize_jira_issue_transitions_and_comments() -> None:
             "comment": {
                 "comments": [
                     {
-                        "author": {"accountId": "user-1", "displayName": "Alice"},
+                        "author": {
+                            "accountId": "user-1",
+                            "displayName": "Alice",
+                            "emailAddress": "alice@example.com",
+                        },
                         "body": "Shipped the fix.",
                         "created": "2026-08-11T15:00:00.000+0000",
                     }
@@ -64,7 +67,7 @@ def test_normalize_jira_issue_transitions_and_comments() -> None:
         changelog,
         date(2026, 8, 8),
         date(2026, 8, 14),
-        jira_account_id="user-1",
+        jira_email="alice@example.com",
     )
     assert normalized["key"] == "EET-5000"
     assert normalized["epic_key"] == "EET-4900"
@@ -91,7 +94,7 @@ def test_filter_person_jira_issues_drops_watcher_only_rows() -> None:
             "comments": [],
         },
     ]
-    kept = filter_person_jira_issues(issues, "712020:abc-def012345678")
+    kept = filter_person_jira_issues(issues, "alice@example.com")
     assert [row["key"] for row in kept] == ["EET-5528"]
 
 

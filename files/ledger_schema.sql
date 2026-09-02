@@ -27,7 +27,6 @@ CREATE TABLE person (
   person_id         text PRIMARY KEY,
   display_name      text NOT NULL,
   slack_user_id     text UNIQUE,
-  jira_account_id   text UNIQUE,
   github_login      text,
   manager_id        text REFERENCES person(person_id),
   active            boolean NOT NULL DEFAULT true
