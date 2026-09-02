@@ -169,3 +169,256 @@ def build_draft_blocks(
 def draft_fallback_text(display_name: str, week_ending: date, *, confirmed: bool = False) -> str:
     prefix = "Confirmed" if confirmed else "Draft"
     return f"{prefix} status for {display_name}, week ending {week_ending.isoformat()}"
+
+
+def build_edit_modal(
+    *,
+    person_id: str,
+    week_ending: date,
+    entries: list[StatusEntry],
+) -> dict[str, Any]:
+    """Build a Slack modal for editing draft status entries.
+
+    Slack modal constraints:
+    - Maximum ~100 blocks total
+    - Each input block counts as multiple blocks
+    - Limit to ~20 entries to stay under limit
+    """
+    week_label = week_ending.strftime("%b %d, %Y")
+
+    # Modal view structure
+    blocks: list[dict[str, Any]] = []
+
+    # Add entry fields (one per epic/project)
+    entries_to_show = entries[:20]  # Slack modal limit
+
+    for idx, entry in enumerate(entries_to_show):
+        entry_title = _entry_title(entry)
+        block_id = f"entry_{idx}"
+
+        # Text input for the outcome
+        blocks.append({
+            "type": "input",
+            "block_id": f"{block_id}_outcome",
+            "label": {
+                "type": "plain_text",
+                "text": f"{entry_title} ({entry.state})"[:75],  # Slack limit
+            },
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "outcome_value",
+                "multiline": True,
+                "initial_value": entry.outcome,
+                "placeholder": {
+                    "type": "plain_text",
+                    "text": "Describe what happened this week...",
+                },
+            },
+            "optional": False,
+        })
+
+        # Checkbox to drop this entry
+        blocks.append({
+            "type": "input",
+            "block_id": f"{block_id}_drop",
+            "label": {
+                "type": "plain_text",
+                "text": "Options",
+            },
+            "element": {
+                "type": "checkboxes",
+                "action_id": "drop_entry",
+                "options": [
+                    {
+                        "text": {"type": "plain_text", "text": "Remove this entry"},
+                        "value": "drop",
+                    }
+                ],
+            },
+            "optional": True,
+        })
+
+    # Show count if we hit the limit
+    if len(entries) > 20:
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"_Showing 20 of {len(entries)} entries. Edit the rest in a second pass._",
+                }
+            ],
+        })
+
+    # Additional unticketed work field
+    blocks.append({
+        "type": "input",
+        "block_id": "unticketed_work",
+        "label": {
+            "type": "plain_text",
+            "text": "Additional work not listed above",
+        },
+        "element": {
+            "type": "plain_text_input",
+            "action_id": "unticketed_value",
+            "multiline": True,
+            "placeholder": {
+                "type": "plain_text",
+                "text": "Meetings, reviews, or other work without a Jira ticket...",
+            },
+        },
+        "optional": True,
+    })
+
+    # Leadership asks field
+    blocks.append({
+        "type": "input",
+        "block_id": "leadership_asks",
+        "label": {
+            "type": "plain_text",
+            "text": "Asks for leadership",
+        },
+        "element": {
+            "type": "plain_text_input",
+            "action_id": "asks_value",
+            "multiline": True,
+            "placeholder": {
+                "type": "plain_text",
+                "text": "Decisions needed, blockers requiring escalation...",
+            },
+        },
+        "optional": True,
+    })
+
+    # Build the modal view
+    modal = {
+        "type": "modal",
+        "callback_id": "edit_status_modal",
+        "private_metadata": json.dumps({
+            "person_id": person_id,
+            "week_ending": week_ending.isoformat(),
+            "entry_count": len(entries_to_show),
+        }),
+        "title": {
+            "type": "plain_text",
+            "text": "Edit Status",
+        },
+        "submit": {
+            "type": "plain_text",
+            "text": "Save Changes",
+        },
+        "close": {
+            "type": "plain_text",
+            "text": "Cancel",
+        },
+        "blocks": blocks,
+    }
+
+    return modal
+
+
+def build_regenerate_modal(
+    *,
+    person_id: str,
+    week_ending: date,
+) -> dict[str, Any]:
+    """Build a Slack modal for regenerating draft status entries.
+
+    User selects a reason for regeneration, then we re-run the drafter skill.
+    """
+    modal = {
+        "type": "modal",
+        "callback_id": "regenerate_status_modal",
+        "private_metadata": json.dumps({
+            "person_id": person_id,
+            "week_ending": week_ending.isoformat(),
+        }),
+        "title": {
+            "type": "plain_text",
+            "text": "Regenerate Draft",
+        },
+        "submit": {
+            "type": "plain_text",
+            "text": "Regenerate",
+        },
+        "close": {
+            "type": "plain_text",
+            "text": "Cancel",
+        },
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "Why do you want to regenerate this draft?",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "regenerate_reason",
+                "label": {
+                    "type": "plain_text",
+                    "text": "Reason",
+                },
+                "element": {
+                    "type": "static_select",
+                    "action_id": "reason_select",
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "Select a reason",
+                    },
+                    "options": [
+                        {
+                            "text": {"type": "plain_text", "text": "Draft missed important work"},
+                            "value": "missed_work",
+                        },
+                        {
+                            "text": {"type": "plain_text", "text": "Epic grouping is wrong"},
+                            "value": "wrong_grouping",
+                        },
+                        {
+                            "text": {"type": "plain_text", "text": "Outcomes are inaccurate"},
+                            "value": "inaccurate",
+                        },
+                        {
+                            "text": {"type": "plain_text", "text": "New Jira/GitHub activity since draft"},
+                            "value": "new_activity",
+                        },
+                        {
+                            "text": {"type": "plain_text", "text": "Other"},
+                            "value": "other",
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "regenerate_notes",
+                "label": {
+                    "type": "plain_text",
+                    "text": "Additional notes (optional)",
+                },
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "notes_value",
+                    "multiline": True,
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "Any specific guidance for the regeneration...",
+                    },
+                },
+                "optional": True,
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "⚠️ This will discard your current draft and create a new one from fresh data.",
+                    }
+                ],
+            },
+        ],
+    }
+
+    return modal
