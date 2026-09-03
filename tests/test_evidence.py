@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from status.skills.evidence import (
     build_evidence_labels,
+    enrich_outcome_links,
     filter_evidence_to_payload,
     inject_markdown_links,
+    inject_pr_markdown_links,
     issue_summary_index,
     jira_keys_from_evidence,
     link_phrase_from_summary,
     markdown_links_to_slack,
     merge_evidence_labels,
     outcome_from_linked_evidence,
+    pr_url_index,
 )
 from status.skills.drafter import attach_evidence_labels, postprocess_draft
 from status.skills.schemas import DraftEntry, DraftOutput
@@ -93,6 +96,88 @@ def test_filter_evidence_to_payload_drops_unowned_jira_keys() -> None:
         pull_requests=[{"url": "https://github.com/org/repo/pull/1"}],
     )
     assert evidence == ["EET-5528", "https://github.com/org/repo/pull/1"]
+
+
+def test_enrich_outcome_links_adds_jira_and_pr_links() -> None:
+    pr_url = "https://github.com/org/repo/pull/18"
+    outcome = enrich_outcome_links(
+        "Completed drafter improvements this week.",
+        "progressing",
+        ["EET-5519", pr_url],
+        {"EET-5519": "agentic weekly status pipeline"},
+        {pr_url: "Improve drafter linked outcomes"},
+    )
+    assert "[agentic weekly status pipeline]" in outcome
+    assert "[Improve drafter linked outcomes]" in outcome
+
+
+def test_postprocess_draft_sets_needs_human_for_null_epic() -> None:
+    draft = DraftOutput(
+        person="yoza",
+        week_ending="2026-08-28",
+        entries=[
+            DraftEntry(
+                project="EET",
+                epic_key=None,
+                epic_name=None,
+                state="progressing",
+                outcome="Worked on pipeline improvements.",
+                evidence=["EET-5519"],
+                evidence_labels={"EET-5519": "agentic weekly status pipeline"},
+                confidence="high",
+            )
+        ],
+    )
+    payload = {
+        "jira_issues": [{"key": "EET-5519", "summary": "Agentic Weekly Status Pipeline"}],
+        "pull_requests": [],
+        "commits": [],
+        "previous_entries": [],
+    }
+    processed = postprocess_draft(draft, payload)
+    assert processed.entries[0].needs_human is True
+    assert processed.entries[0].why_flagged
+
+
+def test_postprocess_draft_adds_stale_epic_and_unticketed_flags() -> None:
+    draft = DraftOutput(
+        person="yoza",
+        week_ending="2026-08-28",
+        entries=[
+            DraftEntry(
+                project="EET",
+                epic_key=None,
+                epic_name=None,
+                state="progressing",
+                outcome="Worked on pipeline.",
+                evidence=["EET-5519"],
+                evidence_labels={"EET-5519": "agentic weekly status pipeline"},
+                confidence="high",
+            )
+        ],
+    )
+    payload = {
+        "jira_issues": [{"key": "EET-5519", "summary": "Agentic Weekly Status Pipeline"}],
+        "pull_requests": [
+            {
+                "url": "https://github.com/opdev/agentic-status-report/pull/17",
+                "title": "M5 synthesizer pipeline",
+                "linked_issue_keys": [],
+            }
+        ],
+        "commits": [],
+        "previous_entries": [
+            {
+                "epic_key": "EET-5493",
+                "epic_name": "OpenShift Cluster Management Bot",
+                "week_ending": "2026-08-14",
+            }
+        ],
+    }
+    processed = postprocess_draft(draft, payload)
+    assert any("EET-5493" in flag for flag in processed.flags)
+    assert any("no linked Jira ticket" in flag for flag in processed.flags)
+    assert processed.unticketed_prompt
 
 
 def test_markdown_links_to_slack() -> None:

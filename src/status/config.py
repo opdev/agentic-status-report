@@ -56,6 +56,14 @@ class Settings(BaseSettings):
 
     drafter_skill_id: str | None = Field(default=None, alias="DRAFTER_SKILL_ID")
     drafter_skill_version: str = Field(default="latest", alias="DRAFTER_SKILL_VERSION")
+    drafter_llm_backend: str = Field(default="skills", alias="DRAFTER_LLM_BACKEND")
+    drafter_max_tokens: int = Field(default=4096, alias="DRAFTER_MAX_TOKENS")
+    drafter_messages_max_tokens: int = Field(default=16384, alias="DRAFTER_MESSAGES_MAX_TOKENS")
+    drafter_skill_max_tokens: int = Field(default=16384, alias="DRAFTER_SKILL_MAX_TOKENS")
+    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    openai_base_url: str | None = Field(default=None, alias="OPENAI_BASE_URL")
+    openai_model: str | None = Field(default=None, alias="OPENAI_MODEL")
+    openai_ssl_verify: bool = Field(default=True, alias="OPENAI_SSL_VERIFY")
     synthesizer_skill_id: str | None = Field(default=None, alias="SYNTHESIZER_SKILL_ID")
     synthesizer_skill_version: str = Field(default="latest", alias="SYNTHESIZER_SKILL_VERSION")
 

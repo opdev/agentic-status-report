@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 import typer
 from rich.console import Console
@@ -14,6 +14,7 @@ from status.config import SKILLS_DIR, get_settings
 from status.db import get_session
 from status.skills.client import SkillClient
 from status.skills.drafter import DraftPersistError, draft_and_persist, load_fixture, run_drafter
+from status.skills.llm_backends import DrafterBackend, backend_config_error, prompt_version_for
 from status.skills.synthesizer import run_synthesizer
 
 app = typer.Typer(no_args_is_help=True, help="Weekly status pipeline CLI")
@@ -110,6 +111,126 @@ def draft(
     output["persisted_entry_ids"] = run_result.persisted_entry_ids
     output["superseded_count"] = run_result.superseded_count
     console.print_json(json.dumps(output, indent=2))
+
+
+def _parse_drafter_backend(value: str) -> DrafterBackend:
+    try:
+        return DrafterBackend.parse(value)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from exc
+
+
+@app.command("draft-compare")
+def draft_compare(
+    fixture: Annotated[
+        Optional[Path], typer.Option("--fixture", "-f", help="Collector payload JSON")
+    ] = None,
+    person: Annotated[
+        Optional[str], typer.Option("--person", "-p", help="Person ID (collects live data)")
+    ] = None,
+    week: Annotated[
+        Optional[str], typer.Option("--week", "-w", help="Week ending Friday (YYYY-MM-DD)")
+    ] = None,
+    backend: Annotated[
+        list[str],
+        typer.Option(
+            "--backend",
+            "-b",
+            help="Backends to compare: skills (hosted Claude skill), messages, openai",
+        ),
+    ] = ["skills", "openai"],
+    output_dir: Annotated[
+        Path,
+        typer.Option("--output-dir", "-o", help="Directory for per-backend JSON output"),
+    ] = Path("draft-compare"),
+    no_persist: Annotated[
+        bool,
+        typer.Option(
+            "--no-persist",
+            help="Accepted for parity with status draft (compare never writes to Postgres)",
+        ),
+    ] = False,
+) -> None:
+    """Run the drafter across multiple LLM backends and write JSON for comparison."""
+    _ = no_persist
+
+    if fixture is not None:
+        try:
+            payload = load_fixture(fixture)
+        except FileNotFoundError as exc:
+            console.print(f"[red]{exc}[/]")
+            raise typer.Exit(1) from exc
+    elif person and week:
+        payload = run_collect(person, _parse_week(week))
+    else:
+        console.print("[red]Provide --fixture or both --person and --week[/]")
+        raise typer.Exit(1)
+
+    if not backend:
+        console.print("[red]Provide at least one --backend[/]")
+        raise typer.Exit(1)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary: dict[str, Any] = {
+        "person": payload.get("person"),
+        "week_ending": payload.get("week_end") or payload.get("week_ending"),
+        "backends": {},
+    }
+
+    table = Table("Backend", "Status", "Entries", "Flags", "Output file")
+    for raw_backend in backend:
+        resolved = _parse_drafter_backend(raw_backend)
+        config_error = backend_config_error(resolved)
+        output_path = output_dir / f"draft-{resolved.value}.json"
+
+        if config_error:
+            result_payload = {
+                "backend": resolved.value,
+                "error": config_error,
+                "draft": None,
+            }
+            output_path.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+            summary["backends"][resolved.value] = result_payload
+            table.add_row(resolved.value, "skipped", "-", "-", str(output_path))
+            continue
+
+        try:
+            draft = run_drafter(payload, backend=resolved)
+        except Exception as exc:  # noqa: BLE001 - surface any unexpected compare failure
+            result_payload = {
+                "backend": resolved.value,
+                "error": str(exc),
+                "draft": None,
+            }
+            output_path.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+            summary["backends"][resolved.value] = result_payload
+            table.add_row(resolved.value, "error", "-", "-", str(output_path))
+            continue
+
+        result_payload = {
+            "backend": resolved.value,
+            "prompt_version": prompt_version_for(resolved),
+            "draft": draft.model_dump(),
+        }
+        output_path.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+        summary["backends"][resolved.value] = {
+            "prompt_version": result_payload["prompt_version"],
+            "entry_count": len(draft.entries),
+            "flag_count": len(draft.flags),
+            "output_file": str(output_path),
+        }
+        table.add_row(
+            resolved.value,
+            "ok",
+            str(len(draft.entries)),
+            str(len(draft.flags)),
+            str(output_path),
+        )
+
+    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    console.print(table)
+    console.print(f"[dim]Wrote summary to {output_dir / 'summary.json'}[/]")
 
 
 @app.command()

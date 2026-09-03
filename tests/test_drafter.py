@@ -12,6 +12,7 @@ from status.skills.drafter import (
     _empty_draft,
     _normalize_draft,
 )
+from status.skills.llm_backends import LlmBackendError
 from status.skills.schemas import DraftEntry, DraftOutput
 
 
@@ -49,42 +50,41 @@ def test_run_drafter_retries_once_on_skill_error() -> None:
 
     with patch("status.skills.drafter.get_settings") as settings_mock:
         settings = settings_mock.return_value
+        settings.drafter_llm_backend = "skills"
         settings.drafter_skill_id = "skill_test"
         settings.drafter_skill_version = "latest"
         settings.anthropic_api_key = "key"
         settings.claude_model = "claude-sonnet-5"
 
-        with patch("status.skills.drafter.SkillClient") as client_cls:
-            client = client_cls.return_value
-            client.invoke_json.side_effect = [
-                __import__("status.skills.client", fromlist=["SkillError"]).SkillError("bad json"),
+        with patch("status.skills.drafter.invoke_drafter_backend") as invoke_mock:
+            invoke_mock.side_effect = [
+                LlmBackendError("bad json"),
                 draft,
             ]
             result = run_drafter(payload)
 
     assert result.entries[0].epic_key == "EET-5493"
-    assert client.invoke_json.call_count == 2
+    assert invoke_mock.call_count == 2
 
 
 def test_run_drafter_returns_flagged_empty_after_two_failures() -> None:
     payload = {"person": "pilot", "week_end": "2026-08-14", "jira_issues": [], "pull_requests": []}
-    from status.skills.client import SkillError
 
     with patch("status.skills.drafter.get_settings") as settings_mock:
         settings = settings_mock.return_value
+        settings.drafter_llm_backend = "skills"
         settings.drafter_skill_id = "skill_test"
         settings.drafter_skill_version = "latest"
         settings.anthropic_api_key = "key"
         settings.claude_model = "claude-sonnet-5"
 
-        with patch("status.skills.drafter.SkillClient") as client_cls:
-            client = client_cls.return_value
-            client.invoke_json.side_effect = SkillError("still bad")
+        with patch("status.skills.drafter.invoke_drafter_backend") as invoke_mock:
+            invoke_mock.side_effect = LlmBackendError("still bad")
             result = run_drafter(payload)
 
     assert result.entries == []
     assert any("failed after retry" in flag for flag in result.flags)
-    assert client.invoke_json.call_count == 2
+    assert invoke_mock.call_count == 2
 
 
 def test_normalize_draft_uses_payload_week_end() -> None:
