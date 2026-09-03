@@ -131,6 +131,93 @@ def filter_evidence_to_payload(
     return kept
 
 
+def outcome_has_markdown_links(text: str) -> bool:
+    return bool(text and MD_LINK_RE.search(text))
+
+
+def pr_url_index(pull_requests: list[dict] | None) -> dict[str, str]:
+    """Map PR URLs to titles from the collector payload."""
+    titles: dict[str, str] = {}
+    for pr in pull_requests or []:
+        url = pr.get("url")
+        if url:
+            titles[str(url)] = str(pr.get("title") or "pull request").strip()
+    return titles
+
+
+def inject_pr_markdown_links(
+    text: str,
+    evidence: list[str],
+    pr_titles: dict[str, str],
+) -> str:
+    """Turn bare PR URLs in evidence into markdown links in the outcome."""
+    if not evidence or not pr_titles:
+        return text
+
+    updated = text or ""
+    appended: list[str] = []
+    for item in evidence:
+        if not item.startswith("http"):
+            continue
+        title = pr_titles.get(item)
+        if not title:
+            continue
+        link = f"[{title}]({item})"
+        if f"]({item})" in updated:
+            continue
+        if item in updated:
+            updated = updated.replace(item, link, 1)
+        else:
+            appended.append(link)
+
+    if appended:
+        if updated and not updated.endswith("."):
+            updated += "."
+        updated = f"{updated} {'; '.join(appended)}.".strip()
+    return updated
+
+
+def enrich_outcome_links(
+    outcome: str,
+    entry_state: str,
+    evidence: list[str],
+    evidence_labels: dict[str, str],
+    pr_titles: dict[str, str],
+    *,
+    jira_base_url: str = "https://redhat.atlassian.net",
+) -> str:
+    """Add Jira and PR markdown links when the model omitted them."""
+    text = outcome
+    jira_labels = {
+        key: label
+        for key, label in evidence_labels.items()
+        if key in set(jira_keys_from_evidence(evidence))
+    }
+
+    if not outcome_has_markdown_links(text):
+        if MILESTONE_ONLY_RE.search(text) and jira_labels:
+            rewritten = outcome_from_linked_evidence(
+                entry_state,
+                evidence,
+                jira_labels,
+                jira_base_url=jira_base_url,
+            )
+            if rewritten:
+                text = rewritten
+        elif jira_labels:
+            rewritten = outcome_from_linked_evidence(
+                entry_state,
+                evidence,
+                jira_labels,
+                jira_base_url=jira_base_url,
+            )
+            if rewritten:
+                text = rewritten
+
+    text = inject_markdown_links(text, evidence_labels, jira_base_url=jira_base_url)
+    return inject_pr_markdown_links(text, evidence, pr_titles)
+
+
 def inject_markdown_links(
     text: str,
     evidence_labels: dict[str, str],

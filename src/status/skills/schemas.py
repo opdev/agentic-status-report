@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class DraftEntry(BaseModel):
@@ -19,6 +19,25 @@ class DraftEntry(BaseModel):
     needs_human: bool = False
     why_flagged: str | None = None
 
+    @field_validator("state", mode="before")
+    @classmethod
+    def _normalize_state(cls, value: str) -> str:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().lower().replace("-", " ").replace("_", " ")
+        aliases = {
+            "in progress": "progressing",
+            "done": "shipped",
+            "complete": "shipped",
+            "completed": "shipped",
+            "shipped": "shipped",
+            "progressing": "progressing",
+            "slipped": "slipped",
+            "blocked": "blocked",
+            "quiet": "quiet",
+        }
+        return aliases.get(normalized, value)
+
 
 class DraftOutput(BaseModel):
     person: str
@@ -26,6 +45,18 @@ class DraftOutput(BaseModel):
     entries: list[DraftEntry] = Field(default_factory=list)
     flags: list[str] = Field(default_factory=list)
     unticketed_prompt: str = ""
+
+    @field_validator("entries", "flags", mode="before")
+    @classmethod
+    def _coerce_lists(cls, value: list[DraftEntry] | list[str] | None) -> list[DraftEntry] | list[str]:
+        if value is None:
+            return []
+        return value
+
+    @field_validator("unticketed_prompt", mode="before")
+    @classmethod
+    def _coerce_unticketed_prompt(cls, value: str | None) -> str:
+        return "" if value is None else value
 
 
 class SynthesisParticipation(BaseModel):

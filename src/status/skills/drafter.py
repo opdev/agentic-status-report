@@ -16,15 +16,21 @@ from sqlalchemy.orm import Session
 from status.config import get_settings
 from status.db import get_session
 from status.db.draft import persist_draft_output
-from status.skills.client import SkillClient, SkillError, SkillRef
+from status.skills.llm_backends import (
+    DrafterBackend,
+    LlmBackendError,
+    backend_config_error,
+    invoke_drafter_backend,
+    prompt_version_for,
+)
 from status.skills.evidence import (
-    MILESTONE_ONLY_RE,
     build_evidence_labels,
+    enrich_outcome_links,
     filter_evidence_to_payload,
-    inject_markdown_links,
     issue_summary_index,
-    outcome_from_linked_evidence,
+    jira_keys_from_evidence,
     payload_jira_keys,
+    pr_url_index,
 )
 from status.skills.schemas import DraftEntry, DraftOutput
 
@@ -115,11 +121,71 @@ def attach_evidence_labels(draft: DraftOutput, payload: dict[str, Any]) -> Draft
     return draft.model_copy(update={"entries": enriched})
 
 
+def _detect_gap_flags(
+    draft: DraftOutput,
+    payload: dict[str, Any],
+) -> tuple[list[str], str]:
+    """Deterministic gap flags small models often omit."""
+    flags = list(draft.flags)
+    unticketed_prompt = draft.unticketed_prompt.strip()
+
+    previous_epics: dict[str, str] = {}
+    for entry in payload.get("previous_entries") or []:
+        epic_key = entry.get("epic_key")
+        if epic_key:
+            previous_epics[str(epic_key)] = str(entry.get("epic_name") or epic_key)
+
+    active_epics: set[str] = set()
+    cited_pr_urls: set[str] = set()
+    for entry in draft.entries:
+        if entry.epic_key:
+            active_epics.add(entry.epic_key)
+        for key in jira_keys_from_evidence(entry.evidence):
+            active_epics.add(key)
+        for item in entry.evidence:
+            if item.startswith("http"):
+                cited_pr_urls.add(item)
+
+    for epic_key, epic_name in previous_epics.items():
+        if epic_key not in active_epics:
+            message = f"{epic_key} ({epic_name}) had no activity this week."
+            if message not in flags:
+                flags.append(message)
+
+    unticketed_prs: list[dict[str, Any]] = []
+    for pr in payload.get("pull_requests") or []:
+        if pr.get("linked_issue_keys"):
+            continue
+        url = pr.get("url")
+        title = str(pr.get("title") or "untitled PR")
+        message = f'PR "{title}" has no linked Jira ticket.'
+        if message not in flags:
+            flags.append(message)
+        if url and url not in cited_pr_urls:
+            unticketed_prs.append(pr)
+
+    if not unticketed_prompt and unticketed_prs:
+        titles = [str(pr.get("title") or "a pull request") for pr in unticketed_prs[:2]]
+        if len(titles) == 1:
+            unticketed_prompt = (
+                f'Should "{titles[0]}" be tied to a Jira ticket for this week\'s status?'
+            )
+        else:
+            unticketed_prompt = (
+                f'Nothing here links "{titles[0]}" or "{titles[1]}" to a ticket — '
+                "which epic should they roll up to?"
+            )
+
+    flags = list(dict.fromkeys(flags))
+    return flags, unticketed_prompt
+
+
 def postprocess_draft(draft: DraftOutput, payload: dict[str, Any]) -> DraftOutput:
     """Filter evidence to this person's payload and enrich outcomes with Jira links."""
     settings = get_settings()
     jira_base_url = settings.jira_base_url or "https://redhat.atlassian.net"
     allowed_keys = payload_jira_keys(payload)
+    pr_titles = pr_url_index(list(payload.get("pull_requests") or []))
     processed: list[DraftEntry] = []
 
     for entry in draft.entries:
@@ -134,23 +200,26 @@ def postprocess_draft(draft: DraftOutput, payload: dict[str, Any]) -> DraftOutpu
             for key, label in entry.evidence_labels.items()
             if key in allowed_keys
         }
-        outcome = entry.outcome
-        if MILESTONE_ONLY_RE.search(outcome) and "[" not in outcome:
-            rewritten = outcome_from_linked_evidence(
-                entry.state,
-                evidence,
-                labels,
-                jira_base_url=jira_base_url,
-            )
-            if rewritten:
-                outcome = rewritten
-        outcome = inject_markdown_links(outcome, labels, jira_base_url=jira_base_url)
+        outcome = enrich_outcome_links(
+            entry.outcome,
+            entry.state,
+            evidence,
+            labels,
+            pr_titles,
+            jira_base_url=jira_base_url,
+        )
 
         updates: dict[str, Any] = {
             "evidence": evidence,
             "evidence_labels": labels,
             "outcome": outcome,
         }
+        if entry.epic_key is None and not entry.needs_human:
+            updates["needs_human"] = True
+            if not entry.why_flagged:
+                updates["why_flagged"] = (
+                    "No epic on this work — which initiative should it roll up to?"
+                )
         if len(evidence) < len(entry.evidence):
             updates["needs_human"] = True
             if not entry.why_flagged:
@@ -160,39 +229,64 @@ def postprocess_draft(draft: DraftOutput, payload: dict[str, Any]) -> DraftOutpu
                 )
         processed.append(entry.model_copy(update=updates))
 
-    return draft.model_copy(update={"entries": processed})
-
-
-def run_drafter(payload: dict[str, Any], *, dry_run: bool = False) -> DraftOutput:
-    settings = get_settings()
-    if dry_run or not settings.drafter_skill_id:
-        return _empty_draft(
-            payload,
-            flags=["dry-run: no skill invocation"] if dry_run else ["no DRAFTER_SKILL_ID configured"],
-        )
-
-    if not settings.anthropic_api_key:
-        return _empty_draft(payload, flags=["ANTHROPIC_API_KEY not configured"])
-
-    client = SkillClient(api_key=settings.anthropic_api_key, model=settings.claude_model)
-    skill = SkillRef(
-        skill_id=settings.drafter_skill_id,
-        version=settings.drafter_skill_version,
+    flags, unticketed_prompt = _detect_gap_flags(
+        draft.model_copy(update={"entries": processed}),
+        payload,
+    )
+    return draft.model_copy(
+        update={
+            "entries": processed,
+            "flags": flags,
+            "unticketed_prompt": unticketed_prompt,
+        }
     )
 
-    last_error: SkillError | None = None
+
+def run_drafter(
+    payload: dict[str, Any],
+    *,
+    dry_run: bool = False,
+    backend: DrafterBackend | None = None,
+) -> DraftOutput:
+    settings = get_settings()
+    if dry_run:
+        return _empty_draft(payload, flags=["dry-run: no skill invocation"])
+
+    resolved = backend or DrafterBackend.parse(settings.drafter_llm_backend)
+    config_error = backend_config_error(resolved)
+    if config_error:
+        return _empty_draft(payload, flags=[config_error])
+
+    instruction = DRAFTER_INSTRUCTION
+    regeneration_notes = str(payload.get("regeneration_notes") or "").strip()
+    if regeneration_notes:
+        instruction = (
+            f"{instruction}\n\nThe user asked to regenerate this draft with this guidance: "
+            f"{regeneration_notes}"
+        )
+
+    last_error: Exception | None = None
     for attempt in range(2):
         try:
-            result = client.invoke_json(skill, payload, DRAFTER_INSTRUCTION, DraftOutput)
+            result = invoke_drafter_backend(
+                resolved,
+                payload,
+                DraftOutput,
+                instruction=instruction,
+            )
             assert isinstance(result, DraftOutput)
             normalized = _normalize_draft(result, payload)
             labeled = attach_evidence_labels(normalized, payload)
             return postprocess_draft(labeled, payload)
-        except SkillError as exc:
+        except LlmBackendError as exc:
             last_error = exc
-            log.warning("drafter attempt %s failed: %s", attempt + 1, exc)
+            log.warning("drafter attempt %s failed (%s): %s", attempt + 1, resolved.value, exc)
 
-    flag = f"drafter failed after retry: {last_error}" if last_error else "drafter failed after retry"
+    flag = (
+        f"drafter failed after retry ({resolved.value}): {last_error}"
+        if last_error
+        else f"drafter failed after retry ({resolved.value})"
+    )
     return _empty_draft(payload, flags=[flag])
 
 
@@ -253,13 +347,14 @@ def draft_and_persist(
     settings = get_settings()
     draft = run_drafter(payload, dry_run=dry_run)
 
-    if settings.drafter_skill_id and not dry_run:
-        prompt_version = SkillRef(
-            skill_id=settings.drafter_skill_id,
-            version=settings.drafter_skill_version,
-        ).prompt_version
-    else:
+    if dry_run:
         prompt_version = "dry-run"
+    else:
+        try:
+            backend = DrafterBackend.parse(settings.drafter_llm_backend)
+            prompt_version = prompt_version_for(backend)
+        except ValueError:
+            prompt_version = settings.drafter_llm_backend
 
     if dry_run or not persist:
         return DraftRunResult(
