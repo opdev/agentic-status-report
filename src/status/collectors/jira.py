@@ -5,10 +5,14 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import urllib.error
+import urllib.request
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from typing import Any
 
-from status.collectors.http import get_json, post_json
+from status.collectors.http import HttpError, get_json, post_json
+from status.collectors.person import roster_jira_email_addresses
 from status.config import Settings, get_settings
 
 log = logging.getLogger(__name__)
@@ -20,12 +24,46 @@ class JiraCollectorError(RuntimeError):
     pass
 
 
+def _probe_jira_auth(base_url: str, email: str, api_token: str) -> bool:
+    auth = base64.b64encode(f"{email}:{api_token}".encode()).decode()
+    request = urllib.request.Request(
+        f"{base_url.rstrip('/')}/rest/api/3/myself",
+        headers={"Authorization": f"Basic {auth}", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return response.status == 200
+    except urllib.error.HTTPError:
+        return False
+
+
+@lru_cache
+def _discover_jira_auth_email(base_url: str, api_token: str) -> str | None:
+    """Find which roster email pairs with this API token (token owner discovery)."""
+    for email in roster_jira_email_addresses():
+        if _probe_jira_auth(base_url, email, api_token):
+            log.info("discovered Jira API auth email %s from roster", email)
+            return email
+    return None
+
+
+def jira_auth_email(settings: Settings) -> str | None:
+    if settings.jira_auth_email:
+        return settings.jira_auth_email
+    if settings.jira_base_url and settings.jira_api_token:
+        return _discover_jira_auth_email(settings.jira_base_url, settings.jira_api_token)
+    return None
+
+
 def _auth_header(settings: Settings) -> dict[str, str]:
-    if not settings.jira_base_url or not settings.jira_email or not settings.jira_api_token:
+    auth_email = jira_auth_email(settings)
+    if not settings.jira_base_url or not auth_email or not settings.jira_api_token:
         raise JiraCollectorError(
-            "Jira credentials not configured. Set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN."
+            "Jira API credentials not configured. Set JIRA_API_TOKEN and either "
+            "JIRA_API_EMAIL (your Atlassian account email) or ensure your email is "
+            "listed in fixtures/eet-persons.json for automatic discovery."
         )
-    token = base64.b64encode(f"{settings.jira_email}:{settings.jira_api_token}".encode()).decode()
+    token = base64.b64encode(f"{auth_email}:{settings.jira_api_token}".encode()).decode()
     return {
         "Authorization": f"Basic {token}",
         "Accept": "application/json",
@@ -269,13 +307,26 @@ def check_project_access(
                 headers=headers,
             )
             if not data.get("issues") and data.get("isLast", True):
-                # Could be empty project or no permission — probe project metadata.
                 try:
                     get_json(f"{base}/rest/api/3/project/{project}", headers=headers)
-                except Exception:
-                    blocked.append(project)
-        except Exception:
-            blocked.append(project)
+                except HttpError as exc:
+                    if exc.status in {401, 403, 404}:
+                        blocked.append(project)
+                    else:
+                        raise JiraCollectorError(
+                            f"Jira API error probing project {project}: {exc}"
+                        ) from exc
+        except HttpError as exc:
+            if exc.status in {401, 403, 404}:
+                blocked.append(project)
+            else:
+                raise JiraCollectorError(
+                    f"Jira API error probing project {project}: {exc}"
+                ) from exc
+        except Exception as exc:
+            raise JiraCollectorError(
+                f"Jira API probe failed for project {project}: {exc}"
+            ) from exc
 
     return blocked
 
@@ -301,7 +352,7 @@ def collect_jira_activity(
     if blocked:
         raise JiraCollectorError(
             f"No API access to Jira project(s): {', '.join(blocked)}. "
-            f"Your token ({settings.jira_email}) needs Browse permission on those projects. "
+            f"Your token ({jira_auth_email(settings)}) needs Browse permission on those projects. "
             "Ask a Jira admin to grant access, then retry."
         )
 

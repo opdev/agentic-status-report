@@ -28,7 +28,16 @@ class Settings(BaseSettings):
         default="https://redhat.atlassian.net",
         alias="JIRA_BASE_URL",
     )
-    jira_email: str | None = Field(default=None, alias="JIRA_EMAIL")
+    jira_api_email: str | None = Field(
+        default=None,
+        alias="JIRA_API_EMAIL",
+        description="Email for Jira REST API authentication (operator token owner)",
+    )
+    jira_email: str | None = Field(
+        default=None,
+        alias="JIRA_EMAIL",
+        description="Deprecated alias for JIRA_API_EMAIL",
+    )
     jira_api_token: str | None = Field(default=None, alias="JIRA_API_TOKEN")
     jira_projects: str = Field(
         default="EET",
@@ -40,7 +49,7 @@ class Settings(BaseSettings):
     github_login: str | None = Field(
         default=None,
         alias="GITHUB_LOGIN",
-        description="Default GitHub username for collect when not in the person table",
+        description="Deprecated; collect uses github_login from the person table",
     )
     github_max_prs: int = Field(default=50, alias="GITHUB_MAX_PRS")
     github_max_commits: int = Field(default=100, alias="GITHUB_MAX_COMMITS")
@@ -58,6 +67,11 @@ class Settings(BaseSettings):
     drafter_skill_version: str = Field(default="latest", alias="DRAFTER_SKILL_VERSION")
     synthesizer_skill_id: str | None = Field(default=None, alias="SYNTHESIZER_SKILL_ID")
     synthesizer_skill_version: str = Field(default="latest", alias="SYNTHESIZER_SKILL_VERSION")
+
+    @property
+    def jira_auth_email(self) -> str | None:
+        """Email paired with JIRA_API_TOKEN for REST authentication."""
+        return self.jira_api_email or self.jira_email
 
     @property
     def pilot_person_id_list(self) -> list[str]:
