@@ -11,7 +11,6 @@ from status.collectors.github import GitHubCollectorError, collect_github_activi
 from status.collectors.jira import JiraCollectorError, collect_jira_activity, filter_person_jira_issues
 from status.collectors.payload import build_payload, week_bounds
 from status.collectors.person import resolve_person
-from status.config import get_settings
 from status.db import get_session
 from status.db.repo import get_previous_confirmed_entries
 
@@ -29,12 +28,6 @@ def run_collect(
 ) -> dict:
     week_start, week_end = week_bounds(week_ending)
     errors: list[str] = []
-
-    settings = get_settings()
-    if jira_email is None:
-        jira_email = settings.jira_email
-    if github_login is None and settings.github_login:
-        github_login = settings.github_login
 
     if dry_run:
         person = resolve_person(
@@ -86,7 +79,10 @@ def run_collect(
             errors.append(f"jira: {exc}")
             log.exception("unexpected jira error for %s", person.person_id)
     else:
-        errors.append("jira: JIRA_EMAIL not configured")
+        errors.append(
+            f"jira: no email for person {person.person_id} "
+            "(seed person.jira_email or fixtures/eet-persons.json)"
+        )
 
     if person.github_login:
         try:
@@ -100,7 +96,7 @@ def run_collect(
             errors.append(f"github: {exc}")
             log.exception("unexpected github error for %s", person.person_id)
     else:
-        errors.append("github: no login for person")
+        errors.append(f"github: no github_login for person {person.person_id}")
 
     payload = build_payload(
         person.person_id,
