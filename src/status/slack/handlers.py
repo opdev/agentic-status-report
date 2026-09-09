@@ -342,9 +342,16 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
 
         try:
             values = view["state"]["values"]
-            edited_outcomes, unticketed_work, leadership_asks = parse_edit_submission_values(
+            edited_outcomes, unticketed_work = parse_edit_submission_values(
                 values,
                 entry_ids=entry_ids,
+            )
+            log.info(
+                "edit submission for %s week %s: %s field(s), %s cleared",
+                person_id,
+                week_ending,
+                len(edited_outcomes),
+                sum(1 for text in edited_outcomes.values() if not text.strip()),
             )
 
             with get_session() as session:
@@ -360,7 +367,6 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
                     edited_outcomes=edited_outcomes,
                     unticketed_work=unticketed_work,
                     existing_unticketed_entry_id=existing_unticketed_entry_id,
-                    leadership_asks=leadership_asks,
                 )
                 session.commit()
                 display_name = person.display_name
@@ -374,10 +380,18 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
                 week_ending=week_ending,
                 confirmed=False,
             )
+            dropped = sum(1 for text in edited_outcomes.values() if not text.strip())
+            updated = len(new_entries)
+            parts: list[str] = []
+            if updated:
+                parts.append(f"{updated} updated")
+            if dropped:
+                parts.append(f"{dropped} removed")
+            detail = f" ({', '.join(parts)})" if parts else ""
             client.chat_postEphemeral(
                 channel=channel,
                 user=slack_user_id,
-                text=f"Changes saved ({len(new_entries)} updated entries).",
+                text=f"Changes saved{detail}.",
             )
         except EditValidationError as exc:
             log.warning("edit validation failed for %s: %s", person_id, exc)

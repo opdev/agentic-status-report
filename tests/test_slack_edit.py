@@ -47,7 +47,7 @@ def test_build_edit_modal_respects_slack_input_block_limit() -> None:
     )
     input_blocks = [block for block in modal["blocks"] if block["type"] == "input"]
     assert len(input_blocks) <= 10
-    assert len(input_blocks) == EDIT_MODAL_MAX_TICKETED + 2
+    assert len(input_blocks) == EDIT_MODAL_MAX_TICKETED + 1
 
 
 def test_build_edit_modal_prefills_unticketed_from_flag() -> None:
@@ -73,17 +73,46 @@ def test_build_edit_modal_prefills_unticketed_from_flag() -> None:
     assert unticketed_block["element"]["initial_value"] == "Meetings and design reviews."
 
 
+def test_parse_edit_submission_values_treats_cleared_field_as_drop() -> None:
+    entry_id = str(uuid4())
+    values = {
+        f"entry_{entry_id}": {"outcome_value": {}},
+    }
+    edited, _ = parse_edit_submission_values(values, entry_ids=[entry_id])
+    assert edited[entry_id] == ""
+
+
+def test_parse_edit_submission_values_treats_missing_block_as_drop() -> None:
+    entry_id = str(uuid4())
+    edited, _ = parse_edit_submission_values({}, entry_ids=[entry_id])
+    assert edited[entry_id] == ""
+
+
 def test_parse_edit_submission_values_maps_entry_ids() -> None:
     entry_id = str(uuid4())
     values = {
         f"entry_{entry_id}": {"outcome_value": {"value": "Updated outcome."}},
         "unticketed_work": {"unticketed_value": {"value": "Side project"}},
-        "leadership_asks": {"asks_value": {"value": "Need a decision"}},
     }
-    edited, unticketed, asks = parse_edit_submission_values(values, entry_ids=[entry_id])
+    edited, unticketed = parse_edit_submission_values(values, entry_ids=[entry_id])
     assert edited[entry_id] == "Updated outcome."
     assert unticketed == "Side project"
-    assert asks == "Need a decision"
+
+
+def test_build_edit_modal_has_missed_work_field() -> None:
+    modal = build_edit_modal(
+        person_id="pilot",
+        week_ending=date(2026, 8, 14),
+        entries=[_entry()],
+        flags=[],
+        channel="C123",
+        message_ts="1234.5678",
+    )
+    missed_block = next(
+        block for block in modal["blocks"] if block.get("block_id") == "unticketed_work"
+    )
+    assert missed_block["label"]["text"] == "Missed or additional work this week"
+    assert "leadership_asks" not in str(modal)
 
 
 def test_persist_edited_entries_creates_drafted_edited_revision() -> None:
@@ -99,7 +128,6 @@ def test_persist_edited_entries_creates_drafted_edited_revision() -> None:
             edited_outcomes={str(entry.entry_id): "Edited outcome."},
             unticketed_work=None,
             existing_unticketed_entry_id=None,
-            leadership_asks=None,
         )
 
     assert entry.is_current is False
@@ -124,12 +152,33 @@ def test_persist_edited_entries_drop_epic_supersedes_without_reinsert() -> None:
             edited_outcomes={str(entry.entry_id): ""},
             unticketed_work=None,
             existing_unticketed_entry_id=None,
-            leadership_asks=None,
         )
 
     assert entry.is_current is False
     assert new_rows == []
     session.add.assert_not_called()
+
+
+def test_persist_edited_entries_adds_missed_work() -> None:
+    entry = _entry()
+    session = MagicMock()
+    session.flush = MagicMock()
+
+    with patch("status.db.edit.get_current_drafts", return_value=[entry]):
+        new_rows = persist_edited_entries(
+            session,
+            "pilot",
+            date(2026, 8, 14),
+            edited_outcomes={str(entry.entry_id): entry.outcome},
+            unticketed_work="Partner sync and design review.",
+            existing_unticketed_entry_id=None,
+        )
+
+    assert len(new_rows) == 1
+    assert new_rows[0].epic_key is None
+    assert new_rows[0].outcome == "Partner sync and design review."
+    assert new_rows[0].source == EntrySource.HUMAN_WRITTEN.value
+    session.add.assert_called_once()
 
 
 def test_persist_edited_entries_leaves_unchanged_rows_current() -> None:
@@ -145,7 +194,6 @@ def test_persist_edited_entries_leaves_unchanged_rows_current() -> None:
             edited_outcomes={str(entry.entry_id): entry.outcome},
             unticketed_work=None,
             existing_unticketed_entry_id=None,
-            leadership_asks=None,
         )
 
     assert entry.is_current is True

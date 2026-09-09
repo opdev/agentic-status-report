@@ -14,7 +14,7 @@ ACTION_EDIT = "status_edit"
 ACTION_REGENERATE = "status_regenerate"
 
 # Slack allows at most 10 input blocks per modal view.
-EDIT_MODAL_MAX_TICKETED = 8  # reserve two inputs for unticketed + leadership asks
+EDIT_MODAL_MAX_TICKETED = 9  # reserve one input for missed/additional work
 
 REGENERATE_REASON_LABELS: dict[str, str] = {
     "missed_work": "Draft missed important work",
@@ -226,7 +226,8 @@ def build_edit_modal(
                 "type": "mrkdwn",
                 "text": (
                     f"*Week ending {week_ending.strftime('%b %d, %Y')}* — "
-                    "edit outcomes below. Leave a field blank to remove that entry."
+                    "edit outcomes below. Leave a field blank to remove that entry. "
+                    "Use the field at the bottom to add work the draft missed."
                 ),
             },
         }
@@ -294,7 +295,7 @@ def build_edit_modal(
         "multiline": True,
         "placeholder": {
             "type": "plain_text",
-            "text": "Meetings, reviews, or other work without a Jira ticket...",
+            "text": "Meetings, side projects, epics not listed above — add Jira links if you have them",
         },
     }
     if unticketed_initial:
@@ -306,30 +307,9 @@ def build_edit_modal(
             "block_id": "unticketed_work",
             "label": {
                 "type": "plain_text",
-                "text": "Additional work not listed above",
+                "text": "Missed or additional work this week",
             },
             "element": unticketed_element,
-            "optional": True,
-        }
-    )
-
-    blocks.append(
-        {
-            "type": "input",
-            "block_id": "leadership_asks",
-            "label": {
-                "type": "plain_text",
-                "text": "Ask for leadership (applies to first epic entry)",
-            },
-            "element": {
-                "type": "plain_text_input",
-                "action_id": "asks_value",
-                "multiline": True,
-                "placeholder": {
-                    "type": "plain_text",
-                    "text": "Decisions needed, blockers requiring escalation...",
-                },
-            },
             "optional": True,
         }
     )
@@ -362,29 +342,24 @@ def parse_edit_submission_values(
     values: dict[str, Any],
     *,
     entry_ids: list[str],
-) -> tuple[dict[str, str], str | None, str | None]:
-    """Return edited outcomes, unticketed work, and leadership asks from modal state."""
+) -> tuple[dict[str, str], str | None]:
+    """Return edited outcomes and missed/additional work from modal state."""
     edited_outcomes: dict[str, str] = {}
     for entry_id in entry_ids:
         block = values.get(f"entry_{entry_id}")
         if block is None:
+            # Optional inputs cleared in Slack may omit the whole block from state.values.
+            edited_outcomes[entry_id] = ""
             continue
-        outcome = block["outcome_value"].get("value")
-        if outcome is None:
-            continue
-        edited_outcomes[entry_id] = outcome
+        # Cleared optional inputs may omit "value" or send null.
+        edited_outcomes[entry_id] = block["outcome_value"].get("value") or ""
 
     unticketed_work = None
     unticketed_block = values.get("unticketed_work")
     if unticketed_block:
         unticketed_work = unticketed_block["unticketed_value"].get("value")
 
-    leadership_asks = None
-    asks_block = values.get("leadership_asks")
-    if asks_block:
-        leadership_asks = asks_block["asks_value"].get("value")
-
-    return edited_outcomes, unticketed_work, leadership_asks
+    return edited_outcomes, unticketed_work
 
 
 def build_regenerate_modal(

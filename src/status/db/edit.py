@@ -60,7 +60,6 @@ def persist_edited_entries(
     edited_outcomes: dict[str, str],
     unticketed_work: str | None,
     existing_unticketed_entry_id: str | None,
-    leadership_asks: str | None,
 ) -> list[StatusEntry]:
     """Apply per-entry edits without touching unchanged current rows."""
     current_entries = get_current_drafts(session, person_id, week_ending)
@@ -69,8 +68,6 @@ def persist_edited_entries(
 
     by_id = {str(entry.entry_id): entry for entry in current_entries}
     new_entries: list[StatusEntry] = []
-    aggregate_ask = leadership_asks.strip() if leadership_asks and leadership_asks.strip() else None
-    aggregate_applied = False
 
     for entry_id, raw_outcome in edited_outcomes.items():
         entry = by_id.get(entry_id)
@@ -94,23 +91,6 @@ def persist_edited_entries(
         )
         session.add(new_entry)
         new_entries.append(new_entry)
-
-    if aggregate_ask and not aggregate_applied:
-        for entry in current_entries:
-            if not entry.is_current or entry.epic_key is None:
-                continue
-            if entry.ask == aggregate_ask:
-                continue
-            _supersede_entry(session, entry)
-            new_entry = _clone_edited_entry(
-                entry,
-                outcome=entry.outcome,
-                ask=aggregate_ask,
-                source=EntrySource.DRAFTED_EDITED.value,
-            )
-            session.add(new_entry)
-            new_entries.append(new_entry)
-            break
 
     unticketed_text = unticketed_work.strip() if unticketed_work else ""
     existing_unticketed: StatusEntry | None = None
