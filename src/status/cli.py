@@ -190,15 +190,13 @@ def report_cmd(
     if write_file is None and (persist or deliver) and not dry_run:
         write_file = Path(default_report_filename(week_ending))
 
-    with get_session() as session:
-        result = synthesize_report(
-            session,
-            week_ending,
-            dry_run=dry_run,
-            persist=persist,
-            deliver=deliver,
-            output_path=write_file,
-        )
+    result = synthesize_report(
+        week_ending,
+        dry_run=dry_run,
+        persist=persist,
+        deliver=deliver,
+        output_path=write_file,
+    )
 
     if write_file:
         console.print(f"Wrote report to {write_file}")

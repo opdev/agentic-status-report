@@ -355,14 +355,14 @@ def _dry_run_output(
     )
 
 
-def run_synthesizer(
-    session: Session,
+def run_synthesizer_from_payload(
+    payload: SynthesisInput,
     week_ending: date,
     *,
     dry_run: bool = False,
     settings: Settings | None = None,
 ) -> SynthesisOutput:
-    payload = build_synthesis_input(session, week_ending)
+    """Invoke the synthesizer skill without holding a database connection."""
     settings = settings or get_settings()
 
     if dry_run:
@@ -396,8 +396,23 @@ def run_synthesizer(
     )
 
 
-def synthesize_report(
+def run_synthesizer(
     session: Session,
+    week_ending: date,
+    *,
+    dry_run: bool = False,
+    settings: Settings | None = None,
+) -> SynthesisOutput:
+    payload = build_synthesis_input(session, week_ending)
+    return run_synthesizer_from_payload(
+        payload,
+        week_ending,
+        dry_run=dry_run,
+        settings=settings,
+    )
+
+
+def synthesize_report(
     week_ending: date,
     *,
     dry_run: bool = False,
@@ -407,9 +422,19 @@ def synthesize_report(
     settings: Settings | None = None,
 ) -> SynthesisOutput:
     """Run synthesizer and optionally persist, write file, and deliver to Slack."""
+    from status.db import get_session
+
     settings = settings or get_settings()
-    confirmed_entries = get_confirmed_entries_for_week(session, week_ending)
-    result = run_synthesizer(session, week_ending, dry_run=dry_run, settings=settings)
+    with get_session() as session:
+        payload = build_synthesis_input(session, week_ending)
+
+    # Skill calls can take minutes; do not keep a port-forwarded DB session open.
+    result = run_synthesizer_from_payload(
+        payload,
+        week_ending,
+        dry_run=dry_run,
+        settings=settings,
+    )
 
     if output_path is not None:
         output_path.write_text(result.markdown)
@@ -432,15 +457,17 @@ def synthesize_report(
         delivered = True
 
     if persist and not dry_run:
-        persist_report_run(
-            session,
-            week_ending,
-            result,
-            prompt_version=SYNTHESIZER_PROMPT_VERSION,
-            model=settings.claude_model,
-            confirmed_entries=confirmed_entries,
-            output_uri=str(output_path) if output_path is not None else None,
-            delivered=delivered,
-        )
+        with get_session() as session:
+            confirmed_entries = get_confirmed_entries_for_week(session, week_ending)
+            persist_report_run(
+                session,
+                week_ending,
+                result,
+                prompt_version=SYNTHESIZER_PROMPT_VERSION,
+                model=settings.claude_model,
+                confirmed_entries=confirmed_entries,
+                output_uri=str(output_path) if output_path is not None else None,
+                delivered=delivered,
+            )
 
     return result

@@ -298,17 +298,28 @@ def test_synthesize_report_deliver_requires_channel(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(synth_module, "get_settings", lambda: settings)
 
     session = MagicMock()
-    with patch.object(synth_module, "get_confirmed_entries_for_week", return_value=[]):
-        with patch.object(synth_module, "run_synthesizer") as run_mock:
-            run_mock.return_value = SynthesisOutput(
-                week_ending="2026-08-14",
-                markdown="# report",
-            )
-            with pytest.raises(RuntimeError, match="REPORT_CHANNEL_ID"):
-                synth_module.synthesize_report(
-                    session,
-                    date(2026, 8, 14),
-                    dry_run=False,
-                    deliver=True,
-                    settings=settings,
+    with patch("status.db.get_session") as session_cm:
+        session_cm.return_value.__enter__.return_value = session
+        session_cm.return_value.__exit__.return_value = None
+        with patch.object(synth_module, "get_confirmed_entries_for_week", return_value=[]):
+            with patch.object(synth_module, "build_synthesis_input") as build_mock:
+                from status.skills.schemas import SynthesisInput, SynthesisOutput
+
+                build_mock.return_value = SynthesisInput(
+                    week_ending="2026-08-14",
+                    entries=[],
+                    participation=[],
+                    flags=[],
                 )
+                with patch.object(synth_module, "run_synthesizer_from_payload") as run_mock:
+                    run_mock.return_value = SynthesisOutput(
+                        week_ending="2026-08-14",
+                        markdown="# report",
+                    )
+                    with pytest.raises(RuntimeError, match="REPORT_CHANNEL_ID"):
+                        synth_module.synthesize_report(
+                            date(2026, 8, 14),
+                            dry_run=False,
+                            deliver=True,
+                            settings=settings,
+                        )
