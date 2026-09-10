@@ -180,10 +180,18 @@ def run_drafter(payload: dict[str, Any], *, dry_run: bool = False) -> DraftOutpu
         version=settings.drafter_skill_version,
     )
 
+    instruction = DRAFTER_INSTRUCTION
+    regeneration_notes = str(payload.get("regeneration_notes") or "").strip()
+    if regeneration_notes:
+        instruction = (
+            f"{instruction}\n\nThe user asked to regenerate this draft with this guidance: "
+            f"{regeneration_notes}"
+        )
+
     last_error: SkillError | None = None
     for attempt in range(2):
         try:
-            result = client.invoke_json(skill, payload, DRAFTER_INSTRUCTION, DraftOutput)
+            result = client.invoke_json(skill, payload, instruction, DraftOutput)
             assert isinstance(result, DraftOutput)
             normalized = _normalize_draft(result, payload)
             labeled = attach_evidence_labels(normalized, payload)

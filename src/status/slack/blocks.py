@@ -13,6 +13,17 @@ ACTION_CONFIRM = "status_confirm"
 ACTION_EDIT = "status_edit"
 ACTION_REGENERATE = "status_regenerate"
 
+# Slack allows at most 10 input blocks per modal view.
+EDIT_MODAL_MAX_TICKETED = 9  # reserve one input for missed/additional work
+
+REGENERATE_REASON_LABELS: dict[str, str] = {
+    "missed_work": "Draft missed important work",
+    "wrong_grouping": "Epic grouping was wrong",
+    "inaccurate": "Outcomes were inaccurate",
+    "new_activity": "New Jira/GitHub activity since draft",
+    "other": "Other reason",
+}
+
 STATE_LABELS: dict[str, str] = {
     "shipped": "Shipped",
     "progressing": "In progress",
@@ -171,156 +182,192 @@ def draft_fallback_text(display_name: str, week_ending: date, *, confirmed: bool
     return f"{prefix} status for {display_name}, week ending {week_ending.isoformat()}"
 
 
+def _unticketed_prefill(entries: list[StatusEntry], flags: list[Flag]) -> str:
+    for entry in entries:
+        if entry.epic_key is None:
+            return entry.outcome
+    for flag in flags:
+        if flag.flag_type == "unticketed":
+            return flag.message
+    return ""
+
+
+def _find_unticketed_entry(entries: list[StatusEntry]) -> StatusEntry | None:
+    for entry in entries:
+        if entry.epic_key is None:
+            return entry
+    return None
+
+
 def build_edit_modal(
     *,
     person_id: str,
     week_ending: date,
     entries: list[StatusEntry],
+    flags: list[Flag],
+    channel: str,
+    message_ts: str,
+    page_offset: int = 0,
 ) -> dict[str, Any]:
     """Build a Slack modal for editing draft status entries.
 
-    Slack modal constraints:
-    - Maximum ~100 blocks total
-    - Each input block counts as multiple blocks
-    - Limit to ~20 entries to stay under limit
+    One input block per ticketed epic (blank outcome removes the entry).
+    Slack allows at most 10 input blocks per modal.
     """
-    week_label = week_ending.strftime("%b %d, %Y")
+    ticketed = [entry for entry in entries if entry.epic_key is not None]
+    page_entries = ticketed[page_offset : page_offset + EDIT_MODAL_MAX_TICKETED]
+    unticketed_entry = _find_unticketed_entry(entries)
+    unticketed_initial = _unticketed_prefill(entries, flags)
 
-    # Modal view structure
-    blocks: list[dict[str, Any]] = []
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Week ending {week_ending.strftime('%b %d, %Y')}* — "
+                    "edit outcomes below. Leave a field blank to remove that entry. "
+                    "Use the field at the bottom to add work the draft missed."
+                ),
+            },
+        }
+    ]
 
-    # Add entry fields (one per epic/project)
-    entries_to_show = entries[:20]  # Slack modal limit
-
-    for idx, entry in enumerate(entries_to_show):
+    entry_ids: list[str] = []
+    for entry in page_entries:
+        entry_id = str(entry.entry_id)
+        entry_ids.append(entry_id)
         entry_title = _entry_title(entry)
-        block_id = f"entry_{idx}"
-
-        # Text input for the outcome
-        blocks.append({
-            "type": "input",
-            "block_id": f"{block_id}_outcome",
-            "label": {
-                "type": "plain_text",
-                "text": f"{entry_title} ({entry.state})"[:75],  # Slack limit
-            },
-            "element": {
-                "type": "plain_text_input",
-                "action_id": "outcome_value",
-                "multiline": True,
-                "initial_value": entry.outcome,
-                "placeholder": {
+        blocks.append(
+            {
+                "type": "input",
+                "block_id": f"entry_{entry_id}",
+                "label": {
                     "type": "plain_text",
-                    "text": "Describe what happened this week...",
+                    "text": f"{entry_title} ({entry.state})"[:75],
                 },
-            },
-            "optional": False,
-        })
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "outcome_value",
+                    "multiline": True,
+                    "initial_value": entry.outcome[:3000],
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "Describe what happened this week...",
+                    },
+                },
+                "optional": True,
+            }
+        )
 
-        # Checkbox to drop this entry
-        blocks.append({
-            "type": "input",
-            "block_id": f"{block_id}_drop",
-            "label": {
-                "type": "plain_text",
-                "text": "Options",
-            },
-            "element": {
-                "type": "checkboxes",
-                "action_id": "drop_entry",
-                "options": [
+    if len(ticketed) > page_offset + len(page_entries):
+        remaining = len(ticketed) - page_offset - len(page_entries)
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
                     {
-                        "text": {"type": "plain_text", "text": "Remove this entry"},
-                        "value": "drop",
+                        "type": "mrkdwn",
+                        "text": (
+                            f"_{remaining} more entr{'y' if remaining == 1 else 'ies'} on the next page. "
+                            "Save, then click Edit again to continue._"
+                        ),
                     }
                 ],
+            }
+        )
+    elif page_offset > 0:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"_Editing entries {page_offset + 1}–{page_offset + len(page_entries)} of {len(ticketed)}._",
+                    }
+                ],
+            }
+        )
+
+    unticketed_element: dict[str, Any] = {
+        "type": "plain_text_input",
+        "action_id": "unticketed_value",
+        "multiline": True,
+        "placeholder": {
+            "type": "plain_text",
+            "text": "Meetings, side projects, epics not listed above — add Jira links if you have them",
+        },
+    }
+    if unticketed_initial:
+        unticketed_element["initial_value"] = unticketed_initial[:3000]
+
+    blocks.append(
+        {
+            "type": "input",
+            "block_id": "unticketed_work",
+            "label": {
+                "type": "plain_text",
+                "text": "Missed or additional work this week",
             },
+            "element": unticketed_element,
             "optional": True,
-        })
+        }
+    )
 
-    # Show count if we hit the limit
-    if len(entries) > 20:
-        blocks.append({
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"_Showing 20 of {len(entries)} entries. Edit the rest in a second pass._",
-                }
-            ],
-        })
-
-    # Additional unticketed work field
-    blocks.append({
-        "type": "input",
-        "block_id": "unticketed_work",
-        "label": {
-            "type": "plain_text",
-            "text": "Additional work not listed above",
-        },
-        "element": {
-            "type": "plain_text_input",
-            "action_id": "unticketed_value",
-            "multiline": True,
-            "placeholder": {
-                "type": "plain_text",
-                "text": "Meetings, reviews, or other work without a Jira ticket...",
-            },
-        },
-        "optional": True,
-    })
-
-    # Leadership asks field
-    blocks.append({
-        "type": "input",
-        "block_id": "leadership_asks",
-        "label": {
-            "type": "plain_text",
-            "text": "Asks for leadership",
-        },
-        "element": {
-            "type": "plain_text_input",
-            "action_id": "asks_value",
-            "multiline": True,
-            "placeholder": {
-                "type": "plain_text",
-                "text": "Decisions needed, blockers requiring escalation...",
-            },
-        },
-        "optional": True,
-    })
-
-    # Build the modal view
-    modal = {
+    return {
         "type": "modal",
         "callback_id": "edit_status_modal",
-        "private_metadata": json.dumps({
-            "person_id": person_id,
-            "week_ending": week_ending.isoformat(),
-            "entry_count": len(entries_to_show),
-        }),
-        "title": {
-            "type": "plain_text",
-            "text": "Edit Status",
-        },
-        "submit": {
-            "type": "plain_text",
-            "text": "Save Changes",
-        },
-        "close": {
-            "type": "plain_text",
-            "text": "Cancel",
-        },
+        "private_metadata": json.dumps(
+            {
+                "person_id": person_id,
+                "week_ending": week_ending.isoformat(),
+                "channel": channel,
+                "message_ts": message_ts,
+                "page_offset": page_offset,
+                "entry_ids": entry_ids,
+                "existing_unticketed_entry_id": (
+                    str(unticketed_entry.entry_id) if unticketed_entry is not None else None
+                ),
+                "total_ticketed": len(ticketed),
+            }
+        ),
+        "title": {"type": "plain_text", "text": "Edit Status"},
+        "submit": {"type": "plain_text", "text": "Save Changes"},
+        "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": blocks,
     }
 
-    return modal
+
+def parse_edit_submission_values(
+    values: dict[str, Any],
+    *,
+    entry_ids: list[str],
+) -> tuple[dict[str, str], str | None]:
+    """Return edited outcomes and missed/additional work from modal state."""
+    edited_outcomes: dict[str, str] = {}
+    for entry_id in entry_ids:
+        block = values.get(f"entry_{entry_id}")
+        if block is None:
+            # Optional inputs cleared in Slack may omit the whole block from state.values.
+            edited_outcomes[entry_id] = ""
+            continue
+        # Cleared optional inputs may omit "value" or send null.
+        edited_outcomes[entry_id] = block["outcome_value"].get("value") or ""
+
+    unticketed_work = None
+    unticketed_block = values.get("unticketed_work")
+    if unticketed_block:
+        unticketed_work = unticketed_block["unticketed_value"].get("value")
+
+    return edited_outcomes, unticketed_work
 
 
 def build_regenerate_modal(
     *,
     person_id: str,
     week_ending: date,
+    channel: str,
+    message_ts: str,
 ) -> dict[str, Any]:
     """Build a Slack modal for regenerating draft status entries.
 
@@ -332,6 +379,8 @@ def build_regenerate_modal(
         "private_metadata": json.dumps({
             "person_id": person_id,
             "week_ending": week_ending.isoformat(),
+            "channel": channel,
+            "message_ts": message_ts,
         }),
         "title": {
             "type": "plain_text",

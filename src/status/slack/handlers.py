@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import date
 from typing import Any
 
@@ -15,21 +16,110 @@ from status.db.confirm import (
     get_unacknowledged_flags,
     latest_confirmed_week,
     latest_unconfirmed_week,
+    record_regeneration,
 )
-from status.db.draft import get_current_drafts, persist_edited_entries
+from status.db.draft import get_current_drafts
+from status.db.edit import EditValidationError, persist_edited_entries
 from status.db.repo import get_person
+from status.db.models import Person
 from status.slack.blocks import (
     ACTION_CONFIRM,
     ACTION_EDIT,
     ACTION_REGENERATE,
+    REGENERATE_REASON_LABELS,
     build_draft_blocks,
     build_edit_modal,
     build_regenerate_modal,
     draft_fallback_text,
+    parse_edit_submission_values,
 )
 from status.slack.send import send_status_review
 
 log = logging.getLogger(__name__)
+
+
+def _authorize_person(session: Any, person_id: str, slack_user_id: str) -> Person | None:
+    person = get_person(session, person_id)
+    if person is None:
+        return None
+    if person.slack_user_id and person.slack_user_id != slack_user_id:
+        return None
+    return person
+
+
+def _post_dm(client: Any, slack_user_id: str, text: str) -> None:
+    dm_response = client.conversations_open(users=[slack_user_id])
+    channel_id = dm_response["channel"]["id"]
+    client.chat_postMessage(channel=channel_id, text=text)
+
+
+def _run_regenerate_background(
+    *,
+    person_id: str,
+    week_ending: date,
+    reason: str,
+    notes: str | None,
+    channel: str,
+    message_ts: str,
+    slack_user_id: str,
+    display_name: str,
+    client: Any,
+) -> None:
+    try:
+        from status.collectors import run_collect
+        from status.skills.drafter import draft_and_persist
+
+        with get_session() as session:
+            record_regeneration(
+                session,
+                person_id,
+                week_ending,
+                reason=reason,
+                notes=notes,
+            )
+            session.commit()
+
+        payload = run_collect(person_id, week_ending)
+        if notes and notes.strip():
+            payload["regeneration_notes"] = notes.strip()
+
+        result = draft_and_persist(payload, dry_run=False, persist=True)
+        log.info(
+            "regenerated draft for %s week %s: %s entries, superseded %s",
+            person_id,
+            week_ending,
+            len(result.persisted_entry_ids),
+            result.superseded_count,
+        )
+
+        _update_message(
+            client,
+            channel=channel,
+            ts=message_ts,
+            person_id=person_id,
+            display_name=display_name,
+            week_ending=week_ending,
+            confirmed=False,
+        )
+        reason_text = REGENERATE_REASON_LABELS.get(reason, reason)
+        client.chat_postEphemeral(
+            channel=channel,
+            user=slack_user_id,
+            text=(
+                f"Draft regenerated ({len(result.persisted_entry_ids)} entries). "
+                f"Reason: {reason_text}"
+            ),
+        )
+    except Exception:
+        log.exception("regenerate failed for %s week %s", person_id, week_ending)
+        try:
+            _post_dm(
+                client,
+                slack_user_id,
+                "Could not regenerate your draft. Try again or use `/weekly-status`.",
+            )
+        except Exception:
+            log.exception("could not send regenerate failure DM")
 
 
 def parse_action_value(raw: str) -> tuple[str, date]:
@@ -131,167 +221,143 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
 
     @app.action(ACTION_EDIT)
     def on_edit(ack: Any, body: dict[str, Any], client: Any) -> None:
-        """Open the edit modal when user clicks Edit button.
-
-        Critical: Must call views.open within 3 seconds of interaction.
-        """
+        """Open the edit modal when user clicks Edit button."""
         ack()
-        log.info("=== Edit button clicked ===")
+        slack_user_id = body["user"]["id"]
+        channel = body["channel"]["id"]
+        message_ts = body["message"]["ts"]
 
         try:
             action = body["actions"][0]
             person_id, week_ending = parse_action_value(action["value"])
             trigger_id = body.get("trigger_id")
-
-            log.info(f"Edit params: person={person_id}, week={week_ending}, has_trigger_id={bool(trigger_id)}")
-
             if not trigger_id:
-                log.error("No trigger_id found in body!")
                 client.chat_postEphemeral(
-                    channel=body["channel"]["id"],
-                    user=body["user"]["id"],
+                    channel=channel,
+                    user=slack_user_id,
                     text="Missing trigger ID. Cannot open modal.",
                 )
                 return
 
-            # Fetch entries - must be fast (< 3 seconds)
-            log.info("Querying database for current drafts...")
             with get_session() as session:
-                entries = get_current_drafts(session, person_id, week_ending)
-
-                log.info(f"Found {len(entries)} draft entries")
-
-                if not entries:
-                    log.warning("No draft entries to edit")
+                person = _authorize_person(session, person_id, slack_user_id)
+                if person is None:
                     client.chat_postEphemeral(
-                        channel=body["channel"]["id"],
-                        user=body["user"]["id"],
+                        channel=channel,
+                        user=slack_user_id,
+                        text="Could not open edit — person record not found or not authorized.",
+                    )
+                    return
+
+                entries = get_current_drafts(session, person_id, week_ending)
+                if not entries:
+                    client.chat_postEphemeral(
+                        channel=channel,
+                        user=slack_user_id,
                         text="No draft entries found to edit.",
                     )
                     return
 
-                # Build modal INSIDE the session so we can access entry attributes
-                log.info("Building modal...")
+                flags = get_unacknowledged_flags(session, person_id, week_ending)
                 modal = build_edit_modal(
                     person_id=person_id,
                     week_ending=week_ending,
                     entries=entries,
+                    flags=flags,
+                    channel=channel,
+                    message_ts=message_ts,
                 )
 
-            log.info(f"Modal has {len(modal.get('blocks', []))} blocks")
-            log.info("Calling Slack views.open API...")
-
             response = client.views_open(trigger_id=trigger_id, view=modal)
+            if not response.get("ok"):
+                log.error("views.open failed: %s", response.get("error"))
 
-            log.info(f"views.open response: ok={response.get('ok')}")
-            if not response.get('ok'):
-                log.error(f"Slack API error: {response.get('error')}")
-
-        except Exception as e:
-            log.exception(f"Failed to open edit modal: {type(e).__name__}: {str(e)}")
+        except Exception:
+            log.exception("failed to open edit modal for %s", slack_user_id)
             client.chat_postEphemeral(
-                channel=body["channel"]["id"],
-                user=body["user"]["id"],
-                text=f"Error: {type(e).__name__}: {str(e)[:100]}",
+                channel=channel,
+                user=slack_user_id,
+                text="Could not open the edit modal. Try again in a moment.",
             )
 
     @app.action(ACTION_REGENERATE)
     def on_regenerate(ack: Any, body: dict[str, Any], client: Any) -> None:
         """Open the regenerate modal when user clicks Regenerate button."""
         ack()
-        log.info("=== Regenerate button clicked ===")
+        slack_user_id = body["user"]["id"]
+        channel = body["channel"]["id"]
+        message_ts = body["message"]["ts"]
 
         try:
             action = body["actions"][0]
             person_id, week_ending = parse_action_value(action["value"])
             trigger_id = body.get("trigger_id")
-
-            log.info(f"Regenerate request: person={person_id}, week={week_ending}")
-
             if not trigger_id:
-                log.error("No trigger_id found!")
                 client.chat_postEphemeral(
-                    channel=body["channel"]["id"],
-                    user=body["user"]["id"],
+                    channel=channel,
+                    user=slack_user_id,
                     text="Missing trigger ID. Cannot open modal.",
                 )
                 return
 
-            # Build and open regenerate modal
+            with get_session() as session:
+                if _authorize_person(session, person_id, slack_user_id) is None:
+                    client.chat_postEphemeral(
+                        channel=channel,
+                        user=slack_user_id,
+                        text="Could not open regenerate — person record not found or not authorized.",
+                    )
+                    return
+
             modal = build_regenerate_modal(
                 person_id=person_id,
                 week_ending=week_ending,
+                channel=channel,
+                message_ts=message_ts,
             )
-
             response = client.views_open(trigger_id=trigger_id, view=modal)
-            log.info(f"Regenerate modal opened: ok={response.get('ok')}")
+            if not response.get("ok"):
+                log.error("regenerate views.open failed: %s", response.get("error"))
 
-        except Exception as e:
-            log.exception(f"Failed to open regenerate modal: {type(e).__name__}: {str(e)}")
+        except Exception:
+            log.exception("failed to open regenerate modal for %s", slack_user_id)
             client.chat_postEphemeral(
-                channel=body["channel"]["id"],
-                user=body["user"]["id"],
-                text=f"Error: {type(e).__name__}: {str(e)[:100]}",
+                channel=channel,
+                user=slack_user_id,
+                text="Could not open the regenerate modal. Try again in a moment.",
             )
 
     @app.view("edit_status_modal")
     def handle_edit_submission(ack: Any, body: dict[str, Any], view: dict[str, Any], client: Any) -> None:
         """Handle modal submission when user saves edited status."""
         ack()
-        log.info("=== Edit modal submitted ===")
+        slack_user_id = body["user"]["id"]
+        metadata = json.loads(view["private_metadata"])
+        person_id = metadata["person_id"]
+        week_ending = date.fromisoformat(metadata["week_ending"])
+        channel = metadata["channel"]
+        message_ts = metadata["message_ts"]
+        entry_ids: list[str] = metadata["entry_ids"]
+        existing_unticketed_entry_id = metadata.get("existing_unticketed_entry_id")
 
         try:
-            # Parse metadata
-            metadata = json.loads(view["private_metadata"])
-            person_id = metadata["person_id"]
-            week_ending = date.fromisoformat(metadata["week_ending"])
-            entry_count = metadata["entry_count"]
-            slack_user_id = body["user"]["id"]
-
-            log.info(f"Processing edit submission: person={person_id}, week={week_ending}, entries={entry_count}")
-
-            # Extract form values
             values = view["state"]["values"]
-            edited_outcomes: dict[int, str] = {}
-            dropped_indices: set[int] = set()
+            edited_outcomes, unticketed_work = parse_edit_submission_values(
+                values,
+                entry_ids=entry_ids,
+            )
+            log.info(
+                "edit submission for %s week %s: %s field(s), %s cleared",
+                person_id,
+                week_ending,
+                len(edited_outcomes),
+                sum(1 for text in edited_outcomes.values() if not text.strip()),
+            )
 
-            for idx in range(entry_count):
-                # Get outcome
-                outcome_block = values.get(f"entry_{idx}_outcome")
-                if outcome_block:
-                    outcome = outcome_block["outcome_value"]["value"]
-                    if outcome:
-                        edited_outcomes[idx] = outcome
-
-                # Check if dropped
-                drop_block = values.get(f"entry_{idx}_drop")
-                if drop_block:
-                    selected = drop_block["drop_entry"].get("selected_options", [])
-                    if selected:
-                        dropped_indices.add(idx)
-                        log.info(f"Entry {idx} marked for deletion")
-
-            # Get unticketed work and asks
-            unticketed_work = None
-            unticketed_block = values.get("unticketed_work")
-            if unticketed_block:
-                unticketed_work = unticketed_block["unticketed_value"].get("value")
-                if unticketed_work:
-                    log.info("Unticketed work added")
-
-            leadership_asks = None
-            asks_block = values.get("leadership_asks")
-            if asks_block:
-                leadership_asks = asks_block["asks_value"].get("value")
-                if leadership_asks:
-                    log.info("Leadership asks added")
-
-            # Persist changes to database
-            log.info("Persisting edited entries to database...")
             with get_session() as session:
-                person = get_person(session, person_id)
-                if not person:
-                    log.warning("edit submission for unknown person %s", person_id)
+                person = _authorize_person(session, person_id, slack_user_id)
+                if person is None:
+                    log.warning("edit submission for unauthorized person %s", person_id)
                     return
 
                 new_entries = persist_edited_entries(
@@ -299,155 +365,124 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
                     person_id,
                     week_ending,
                     edited_outcomes=edited_outcomes,
-                    dropped_indices=dropped_indices,
                     unticketed_work=unticketed_work,
-                    leadership_asks=leadership_asks,
+                    existing_unticketed_entry_id=existing_unticketed_entry_id,
                 )
                 session.commit()
-
                 display_name = person.display_name
 
-            log.info(f"Persisted {len(new_entries)} entries")
-
-            # Send updated draft as a NEW message
-            # (We could update the original message if we tracked its ts, but new message is clearer)
-            log.info("Sending updated draft message...")
-            result = send_status_review(
-                person_id,
-                week_ending,
-                bot_token=bot_token,
+            _update_message(
+                client,
+                channel=channel,
+                ts=message_ts,
+                person_id=person_id,
+                display_name=display_name,
+                week_ending=week_ending,
                 confirmed=False,
             )
-
-            log.info(f"Updated draft sent: channel={result.get('channel')}, ts={result.get('ts')}")
-
-            # Send a regular message (not ephemeral) so user can see it
+            dropped = sum(1 for text in edited_outcomes.values() if not text.strip())
+            updated = len(new_entries)
+            parts: list[str] = []
+            if updated:
+                parts.append(f"{updated} updated")
+            if dropped:
+                parts.append(f"{dropped} removed")
+            detail = f" ({', '.join(parts)})" if parts else ""
+            client.chat_postEphemeral(
+                channel=channel,
+                user=slack_user_id,
+                text=f"Changes saved{detail}.",
+            )
+        except EditValidationError as exc:
+            log.warning("edit validation failed for %s: %s", person_id, exc)
+            client.chat_postEphemeral(
+                channel=channel,
+                user=slack_user_id,
+                text=f"Could not save changes: {exc}",
+            )
+        except Exception:
+            log.exception("edit submission failed for %s week %s", person_id, week_ending)
             try:
-                dm_response = client.conversations_open(users=[slack_user_id])
-                channel_id = dm_response["channel"]["id"]
-
-                client.chat_postMessage(
-                    channel=channel_id,
-                    text=f"✅ *Changes saved!* {len(new_entries)} entries updated. See the new draft message above.",
-                )
-                log.info("Confirmation message sent")
-            except Exception:
-                log.exception("Could not send confirmation message after edit")
-
-        except Exception as e:
-            log.exception(f"Failed to process edit submission: {type(e).__name__}: {str(e)}")
-            # Modal is already closed, can't show error in modal
-            # Send DM with error
-            try:
-                dm_response = client.conversations_open(users=[slack_user_id])
-                channel_id = dm_response["channel"]["id"]
-                client.chat_postMessage(
-                    channel=channel_id,
-                    text=f"❌ Error saving changes: {str(e)[:200]}",
+                _post_dm(
+                    client,
+                    slack_user_id,
+                    "Could not save your edits. Try again or use `/weekly-status`.",
                 )
             except Exception:
-                log.exception("Could not send error message")
+                log.exception("could not send edit failure DM")
 
     @app.view("regenerate_status_modal")
     def handle_regenerate_submission(ack: Any, body: dict[str, Any], view: dict[str, Any], client: Any) -> None:
         """Handle modal submission when user regenerates status."""
         ack()
-        log.info("=== Regenerate modal submitted ===")
+        slack_user_id = body["user"]["id"]
+        metadata = json.loads(view["private_metadata"])
+        person_id = metadata["person_id"]
+        week_ending = date.fromisoformat(metadata["week_ending"])
+        channel = metadata["channel"]
+        message_ts = metadata["message_ts"]
+
+        values = view["state"]["values"]
+        reason = None
+        reason_block = values.get("regenerate_reason")
+        if reason_block:
+            selected = reason_block["reason_select"].get("selected_option")
+            if selected:
+                reason = selected["value"]
+
+        notes = None
+        notes_block = values.get("regenerate_notes")
+        if notes_block:
+            notes = notes_block["notes_value"].get("value")
+
+        if not reason:
+            client.chat_postEphemeral(
+                channel=channel,
+                user=slack_user_id,
+                text="Select a reason before regenerating.",
+            )
+            return
 
         try:
-            # Parse metadata
-            metadata = json.loads(view["private_metadata"])
-            person_id = metadata["person_id"]
-            week_ending = date.fromisoformat(metadata["week_ending"])
-            slack_user_id = body["user"]["id"]
+            with get_session() as session:
+                person = _authorize_person(session, person_id, slack_user_id)
+                if person is None:
+                    log.warning("regenerate submission for unauthorized person %s", person_id)
+                    return
+                display_name = person.display_name
 
-            log.info(f"Processing regenerate request: person={person_id}, week={week_ending}")
-
-            # Extract form values
-            values = view["state"]["values"]
-
-            # Get reason
-            reason_block = values.get("regenerate_reason")
-            reason = None
-            if reason_block:
-                selected = reason_block["reason_select"].get("selected_option")
-                if selected:
-                    reason = selected["value"]
-
-            # Get optional notes
-            notes = None
-            notes_block = values.get("regenerate_notes")
-            if notes_block:
-                notes = notes_block["notes_value"].get("value")
-
-            log.info(f"Regenerate reason: {reason}, has_notes: {bool(notes)}")
-
-            # Import collector and drafter functions
-            from status.collectors import run_collect
-            from status.skills.drafter import draft_and_persist
-
-            # Re-collect data
-            log.info("Re-collecting activity data...")
-            payload = run_collect(person_id, week_ending)
-
-            # If user provided notes, add to collection errors so drafter sees them
-            collection_errors = list(payload.get("collection_errors") or [])
-            if notes and notes.strip():
-                collection_errors.append(f"User regeneration note: {notes.strip()}")
-                payload["collection_errors"] = collection_errors
-
-            # Re-run drafter
-            log.info("Re-running drafter...")
-            result = draft_and_persist(payload, dry_run=False, persist=True)
-
-            log.info(f"Regenerated {len(result.persisted_entry_ids)} entries, superseded {result.superseded_count}")
-
-            # Send updated draft message
-            log.info("Sending regenerated draft message...")
-            from status.slack.send import send_status_review
-            send_result = send_status_review(
-                person_id,
-                week_ending,
-                bot_token=bot_token,
-                confirmed=False,
+            client.chat_postEphemeral(
+                channel=channel,
+                user=slack_user_id,
+                text="Regenerating your draft — this may take a minute...",
             )
 
-            log.info(f"Regenerated draft sent: channel={send_result.get('channel')}, ts={send_result.get('ts')}")
-
-            # Send confirmation message
+            thread = threading.Thread(
+                target=_run_regenerate_background,
+                kwargs={
+                    "person_id": person_id,
+                    "week_ending": week_ending,
+                    "reason": reason,
+                    "notes": notes,
+                    "channel": channel,
+                    "message_ts": message_ts,
+                    "slack_user_id": slack_user_id,
+                    "display_name": display_name,
+                    "client": client,
+                },
+                daemon=True,
+            )
+            thread.start()
+        except Exception:
+            log.exception("regenerate submission failed for %s week %s", person_id, week_ending)
             try:
-                dm_response = client.conversations_open(users=[slack_user_id])
-                channel_id = dm_response["channel"]["id"]
-
-                reason_text = {
-                    "missed_work": "Draft missed important work",
-                    "wrong_grouping": "Epic grouping was wrong",
-                    "inaccurate": "Outcomes were inaccurate",
-                    "new_activity": "New Jira/GitHub activity since draft",
-                    "other": "Other reason",
-                }.get(reason, "Unknown reason")
-
-                client.chat_postMessage(
-                    channel=channel_id,
-                    text=f"✅ *Draft regenerated!* {len(result.persisted_entry_ids)} entries created from fresh data. Reason: {reason_text}",
-                )
-                log.info("Confirmation message sent")
-            except Exception:
-                log.exception("Could not send confirmation message after regenerate")
-
-        except Exception as e:
-            log.exception(f"Failed to process regenerate submission: {type(e).__name__}: {str(e)}")
-            # Modal is already closed, can't show error in modal
-            # Send DM with error
-            try:
-                dm_response = client.conversations_open(users=[slack_user_id])
-                channel_id = dm_response["channel"]["id"]
-                client.chat_postMessage(
-                    channel=channel_id,
-                    text=f"❌ Error regenerating draft: {str(e)[:200]}",
+                _post_dm(
+                    client,
+                    slack_user_id,
+                    "Could not start regeneration. Try again in a moment.",
                 )
             except Exception:
-                log.exception("Could not send error message")
+                log.exception("could not send regenerate failure DM")
 
     @app.command("/weekly-status")
     def on_weekly_status_command(ack: Any, command: dict[str, Any], client: Any) -> None:
