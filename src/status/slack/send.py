@@ -116,3 +116,33 @@ def send_draft_review(
         bot_token=bot_token,
         confirmed=False,
     )
+
+
+def post_report_to_channel(
+    markdown: str,
+    week_ending: date,
+    *,
+    bot_token: str,
+    channel_id: str,
+) -> dict[str, str]:
+    """
+    Post synthesized report markdown to a Slack channel.
+    """
+    WebClient = _require_slack_client()
+    client = WebClient(token=bot_token)
+
+    header_text = f"*Weekly Status Report - Week Ending {week_ending.strftime('%b %d, %Y')}*"
+
+    response = client.chat_postMessage(
+        channel=channel_id,
+        text=header_text + "\n\n" + markdown,
+        mrkdwn=True,
+    )
+
+    log.info(f"Posted report to channel {channel_id} for week {week_ending}")
+
+    return {
+        "channel": str(response["channel"]),
+        "ts": str(response["ts"]),
+        "week_ending": week_ending.isoformat(),
+    }

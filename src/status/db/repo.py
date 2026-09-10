@@ -71,3 +71,34 @@ def get_previous_confirmed_entries(
 
 def get_person(session: Session, person_id: str) -> Person | None:
     return session.get(Person, person_id)
+
+
+def get_active_persons(session: Session) -> list[Person]:
+    """Query all active persons (Person.active = true)."""
+    stmt = select(Person).where(Person.active.is_(True))
+    return list(session.scalars(stmt).all())
+
+
+def filter_pilot_persons(persons: list[Person], pilot_ids: list[str]) -> list[Person]:
+    """
+    Filter persons by pilot allowlist if non-empty.
+    If pilot_ids is empty, return all persons.
+    """
+    if not pilot_ids:
+        return persons
+    pilot_set = set(pilot_ids)
+    return [p for p in persons if p.person_id in pilot_set]
+
+
+def get_eligible_persons(session: Session) -> list[Person]:
+    """
+    Get persons eligible for batch operations:
+    - Query Person.active = true
+    - Filter by PILOT_PERSON_IDS env if non-empty
+    """
+    from status.config import get_settings
+
+    settings = get_settings()
+
+    active_persons = get_active_persons(session)
+    return filter_pilot_persons(active_persons, settings.pilot_person_id_list)

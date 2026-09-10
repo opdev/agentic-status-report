@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: weekly-status-lock-and-report
+  labels:
+    app.kubernetes.io/name: weekly-status
+    app.kubernetes.io/component: automation
+spec:
+  schedule: "0 14 * * 1"  # Monday 09:00 ET
+  timeZone: "America/New_York"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: weekly-status
+            app.kubernetes.io/component: automation
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: lock-and-report
+              image: quay.io/opdev/weekly-status:latest
+              imagePullPolicy: Always
+              command: ["sh", "-c", "set -eu && status run-week lock-and-report --week auto --deliver"]
+              envFrom:
+                - secretRef:
+                    name: weekly-status-secrets
+              resources:
+                requests:
+                  memory: 512Mi
+                  cpu: 200m
+                limits:
+                  memory: 1Gi
+                  cpu: "1"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
