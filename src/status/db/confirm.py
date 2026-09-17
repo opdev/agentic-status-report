@@ -153,3 +153,53 @@ def get_confirmed_entries_for_person(
         StatusEntry.confirmed_at.is_not(None),
     )
     return list(session.scalars(stmt).all())
+
+
+def expire_unconfirmed_participations(session: Session, week_ending: date) -> int:
+    """
+    Set participation.status = 'expired' for all unconfirmed drafts.
+    Returns count of expired participations.
+    """
+    stmt = (
+        select(Participation)
+        .where(
+            Participation.week_ending == week_ending,
+            Participation.status == 'sent',
+        )
+    )
+    participations = list(session.scalars(stmt).all())
+
+    for p in participations:
+        p.status = 'expired'
+
+    session.flush()
+    return len(participations)
+
+
+def get_unconfirmed_participations(
+    session: Session,
+    week_ending: date,
+    max_reminders: int = 2,
+) -> list[tuple[Person, Participation]]:
+    """
+    Get persons with unconfirmed drafts who haven't exceeded reminder limit.
+    Returns list of (Person, Participation) tuples.
+    """
+    stmt = (
+        select(Person, Participation)
+        .join(Participation, Person.person_id == Participation.person_id)
+        .where(
+            Participation.week_ending == week_ending,
+            Participation.status == 'sent',
+            Participation.reminder_count < max_reminders,
+        )
+    )
+    return list(session.execute(stmt).all())
+
+
+def increment_reminder_count(session: Session, person_id: str, week_ending: date) -> None:
+    """Increment reminder_count for this person/week."""
+    row = session.get(Participation, (person_id, week_ending))
+    if row is not None:
+        row.reminder_count += 1
+        session.flush()

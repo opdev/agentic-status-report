@@ -19,8 +19,10 @@ from status.skills.synthesizer import default_report_filename, synthesize_report
 app = typer.Typer(no_args_is_help=True, help="Weekly status pipeline CLI")
 skills_app = typer.Typer(no_args_is_help=True, help="Manage Claude Agent Skills")
 slack_app = typer.Typer(no_args_is_help=True, help="Slack bot for draft review")
+batch_app = typer.Typer(no_args_is_help=True, help="Batch operations for weekly automation")
 app.add_typer(skills_app, name="skills")
 app.add_typer(slack_app, name="slack")
+app.add_typer(batch_app, name="run-week")
 
 console = Console()
 
@@ -122,6 +124,15 @@ def send(
     _dry_run_flag(dry_run)
     week_ending = _parse_week(week)
     settings = get_settings()
+
+    # Enforce pilot filtering
+    if settings.pilot_person_id_list:
+        if person not in settings.pilot_person_id_list:
+            console.print(
+                f"[red]Person {person} not in PILOT_PERSON_IDS allowlist: "
+                f"{settings.pilot_person_id_list}[/]"
+            )
+            raise typer.Exit(1)
 
     if dry_run:
         console.print(
@@ -252,6 +263,212 @@ def skills_publish(
         new_id = client.upload(skill_dir, display_name=dir_name)
         console.print(f"Created {dir_name} with id {new_id}")
         console.print(f"Set {skill.upper()}_SKILL_ID={new_id} in your environment")
+
+
+@batch_app.command("collect-and-draft")
+def batch_collect_and_draft(
+    week: Annotated[Optional[str], typer.Option("--week", "-w")] = "auto",
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """For each active pilot person: collect + draft. Friday 08:30 ET automation."""
+    from status.batch import run_batch_operation
+    from status.collectors.payload import resolve_week_ending
+    from status.db.models import Person
+    from sqlalchemy.orm import Session
+
+    _dry_run_flag(dry_run)
+    week_ending = resolve_week_ending(week)
+
+    def collect_and_draft_person(session: Session, person: Person, week: date) -> dict:
+        from status.collectors import run_collect
+        from status.skills.drafter import draft_and_persist
+
+        payload = run_collect(
+            person.person_id,
+            week,
+            dry_run=dry_run,
+            jira_email=person.jira_email,
+            github_login=person.github_login,
+        )
+
+        if not dry_run:
+            run_result = draft_and_persist(payload, dry_run=False, persist=True, session=session)
+            return {
+                "person_id": person.person_id,
+                "entry_count": len(run_result.persisted_entry_ids),
+                "superseded": run_result.superseded_count,
+            }
+        return {"person_id": person.person_id, "dry_run": True}
+
+    results = run_batch_operation(week_ending, collect_and_draft_person, "collect-and-draft")
+
+    successes = [r for r in results if r.success]
+    failures = [r for r in results if not r.success]
+
+    console.print(f"\n[green]Completed {len(successes)}/{len(results)} persons[/]")
+    if failures:
+        console.print(f"[red]Failed: {[r.person_id for r in failures]}[/]")
+        for f in failures:
+            console.print(f"  {f.person_id}: {f.error}")
+
+
+@batch_app.command("send-drafts")
+def batch_send_drafts(
+    week: Annotated[Optional[str], typer.Option("--week", "-w")] = "auto",
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """For each active pilot person: send draft review DM. Friday 09:00 ET automation."""
+    from status.batch import run_batch_operation
+    from status.collectors.payload import resolve_week_ending
+    from status.db.models import Person
+    from sqlalchemy.orm import Session
+
+    _dry_run_flag(dry_run)
+    week_ending = resolve_week_ending(week)
+    settings = get_settings()
+
+    if not settings.slack_bot_token:
+        console.print("[red]SLACK_BOT_TOKEN not set[/]")
+        raise typer.Exit(1)
+
+    def send_draft_for_person(session: Session, person: Person, week: date) -> dict:
+        from status.slack.send import send_draft_review
+
+        if not person.slack_user_id:
+            raise ValueError(f"Person {person.person_id} has no slack_user_id")
+
+        if dry_run:
+            return {"person_id": person.person_id, "dry_run": True}
+
+        result = send_draft_review(person.person_id, week, bot_token=settings.slack_bot_token)
+        return result
+
+    results = run_batch_operation(week_ending, send_draft_for_person, "send-drafts")
+
+    successes = [r for r in results if r.success]
+    failures = [r for r in results if not r.success]
+
+    console.print(f"\n[green]Sent to {len(successes)}/{len(results)} persons[/]")
+    if failures:
+        console.print(f"[red]Failed: {[r.person_id for r in failures]}[/]")
+
+
+@batch_app.command("nudge")
+def batch_nudge(
+    week: Annotated[Optional[str], typer.Option("--week", "-w")] = "auto",
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    max_reminders: Annotated[int, typer.Option("--max-reminders")] = 2,
+) -> None:
+    """Send reminder DMs to persons with unconfirmed drafts. Friday 14:00 ET automation."""
+    from status.collectors.payload import resolve_week_ending
+    from status.db.confirm import get_unconfirmed_participations, increment_reminder_count
+
+    _dry_run_flag(dry_run)
+    week_ending = resolve_week_ending(week)
+    settings = get_settings()
+
+    if not settings.slack_bot_token:
+        console.print("[red]SLACK_BOT_TOKEN not set[/]")
+        raise typer.Exit(1)
+
+    from slack_sdk import WebClient
+    from status.slack.send import open_dm_channel
+
+    client = WebClient(token=settings.slack_bot_token)
+
+    with get_session() as session:
+        unconfirmed = get_unconfirmed_participations(session, week_ending, max_reminders)
+
+        if not unconfirmed:
+            console.print(f"[dim]No persons need reminders for week {week_ending}[/]")
+            return
+
+        console.print(f"Sending reminders to {len(unconfirmed)} persons")
+
+        for person, participation in unconfirmed:
+            try:
+                if not person.slack_user_id:
+                    log.warning(f"Person {person.person_id} has no slack_user_id, skipping")
+                    continue
+
+                if dry_run:
+                    console.print(
+                        f"[dim]Would nudge {person.person_id} (reminder #{participation.reminder_count + 1})[/]"
+                    )
+                    continue
+
+                channel_id = open_dm_channel(client, person.slack_user_id)
+                reminder_text = (
+                    f"Hi {person.display_name}! Friendly reminder to review and confirm "
+                    f"your draft status for the week of {week_ending.isoformat()}. "
+                    f"This is reminder #{participation.reminder_count + 1}."
+                )
+                client.chat_postMessage(channel=channel_id, text=reminder_text)
+
+                increment_reminder_count(session, person.person_id, week_ending)
+                session.commit()
+
+                log.info(
+                    f"Sent reminder to {person.person_id} (count: {participation.reminder_count + 1})"
+                )
+                console.print(f"[green]✓[/] {person.person_id}")
+
+            except Exception as exc:
+                log.error(f"Failed to nudge {person.person_id}: {exc}")
+                console.print(f"[red]✗[/] {person.person_id}: {exc}")
+
+
+@batch_app.command("lock-and-report")
+def batch_lock_and_report(
+    week: Annotated[Optional[str], typer.Option("--week", "-w")] = "auto",
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    deliver: Annotated[bool, typer.Option("--deliver")] = True,
+) -> None:
+    """Expire unconfirmed drafts, synthesize report, deliver to Slack. Monday 09:00 ET automation."""
+    from status.collectors.payload import resolve_week_ending
+    from status.db.confirm import expire_unconfirmed_participations
+
+    _dry_run_flag(dry_run)
+    week_ending = resolve_week_ending(week)
+    settings = get_settings()
+
+    with get_session() as session:
+        # Step 1: Expire unconfirmed
+        if not dry_run:
+            expired_count = expire_unconfirmed_participations(session, week_ending)
+            session.commit()
+            console.print(f"Expired {expired_count} unconfirmed participations")
+        else:
+            console.print("[dim]Would expire unconfirmed participations[/]")
+
+        # Step 2: Synthesize report
+        result = run_synthesizer(session, week_ending, dry_run=dry_run)
+        console.print("\n--- Report Preview ---")
+        console.print(result.markdown[:500] + "..." if len(result.markdown) > 500 else result.markdown)
+
+        # Step 3: Deliver to Slack channel
+        if deliver and not dry_run:
+            if not settings.report_channel_id:
+                console.print("[yellow]REPORT_CHANNEL_ID not set, skipping delivery[/]")
+            elif not settings.slack_bot_token:
+                console.print("[red]SLACK_BOT_TOKEN not set[/]")
+                raise typer.Exit(1)
+            else:
+                from status.slack.send import post_report_to_channel
+
+                delivery_result = post_report_to_channel(
+                    result.markdown,
+                    week_ending,
+                    bot_token=settings.slack_bot_token,
+                    channel_id=settings.report_channel_id,
+                )
+                console.print(
+                    f"[green]Report delivered to Slack channel {delivery_result['channel']}[/]"
+                )
+        elif deliver and dry_run:
+            console.print("[dim]Would deliver report to Slack channel[/]")
+        else:
+            console.print("[dim]Delivery skipped (--no-deliver)[/]")
 
 
 if __name__ == "__main__":
