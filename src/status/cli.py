@@ -14,7 +14,7 @@ from status.config import SKILLS_DIR, get_settings
 from status.db import get_session
 from status.skills.client import SkillClient
 from status.skills.drafter import DraftPersistError, draft_and_persist, load_fixture, run_drafter
-from status.skills.synthesizer import run_synthesizer
+from status.skills.synthesizer import default_report_filename, synthesize_report
 
 app = typer.Typer(no_args_is_help=True, help="Weekly status pipeline CLI")
 skills_app = typer.Typer(no_args_is_help=True, help="Manage Claude Agent Skills")
@@ -159,21 +159,48 @@ def slack_run() -> None:
 @app.command(name="report")
 def report_cmd(
     week: Annotated[str, typer.Option("--week", "-w")],
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = True,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--no-dry-run",
+            help="Preview from ledger without invoking the synthesizer skill",
+        ),
+    ] = True,
+    persist: Annotated[
+        bool,
+        typer.Option("--persist/--no-persist", help="Write report_run audit rows to Postgres"),
+    ] = False,
+    deliver: Annotated[
+        bool,
+        typer.Option("--deliver", help="Post markdown to REPORT_CHANNEL_ID"),
+    ] = False,
     output: Annotated[
-        Optional[Path], typer.Option("--output", "-o", help="Write markdown report to file")
+        Optional[Path],
+        typer.Option(
+            "--output",
+            "-o",
+            help="Write markdown report to file (default: status-YYYY-MM-DD.md when persisting or delivering)",
+        ),
     ] = None,
 ) -> None:
     """Synthesize the management report for a week."""
     _dry_run_flag(dry_run)
     week_ending = _parse_week(week)
-    with get_session() as session:
-        result = run_synthesizer(session, week_ending, dry_run=dry_run)
+    write_file = output
+    if write_file is None and (persist or deliver) and not dry_run:
+        write_file = Path(default_report_filename(week_ending))
 
-    if output:
-        output.write_text(result.markdown)
-        console.print(f"Wrote report to {output}")
-    else:
+    result = synthesize_report(
+        week_ending,
+        dry_run=dry_run,
+        persist=persist,
+        deliver=deliver,
+        output_path=write_file,
+    )
+
+    if write_file:
+        console.print(f"Wrote report to {write_file}")
+    elif not deliver:
         console.print(result.markdown)
 
 

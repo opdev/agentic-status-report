@@ -74,6 +74,7 @@ def test_persist_draft_output_creates_status_entries() -> None:
                 state="progressing",
                 outcome="Shipped destroy and scheduling features.",
                 evidence=["EET-5500", "https://github.com/example-org/example-repo/pull/26"],
+                evidence_labels={"EET-5500": "destroy command support"},
                 confidence="high",
             )
         ],
@@ -92,3 +93,4 @@ def test_persist_draft_output_creates_status_entries() -> None:
     assert len(rows) == 1
     assert rows[0].outcome == "Shipped destroy and scheduling features."
     assert rows[0].epic_key == "EET-5493"
+    assert rows[0].extra["evidence_labels"] == {"EET-5500": "destroy command support"}

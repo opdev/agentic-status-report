@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from status.db.models import Participation, Person, StatusEntry
+from status.db.models import Flag, Participation, Person, StatusEntry
 
 
 def get_current_entries_for_week(session: Session, week_ending: date) -> list[StatusEntry]:
@@ -67,6 +67,14 @@ def get_previous_confirmed_entries(
         }
         for row in rows
     ]
+
+
+def get_unacknowledged_flags_for_week(session: Session, week_ending: date) -> list[Flag]:
+    stmt = select(Flag).where(
+        Flag.week_ending == week_ending,
+        Flag.acknowledged.is_(False),
+    )
+    return list(session.scalars(stmt).all())
 
 
 def get_person(session: Session, person_id: str) -> Person | None:

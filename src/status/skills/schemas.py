@@ -51,6 +51,7 @@ class SynthesisEntry(BaseModel):
     blocker: str | None = None
     ask: str | None = None
     evidence: list[str] = Field(default_factory=list)
+    evidence_labels: dict[str, str] = Field(default_factory=dict)
 
 
 class SynthesisInput(BaseModel):

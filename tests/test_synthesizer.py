@@ -1,0 +1,325 @@
+from __future__ import annotations
+
+import re
+from datetime import date, datetime, timezone
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
+
+import pytest
+
+from status.db.models import Participation, Person, ReportRun, StatusEntry
+from status.db.report import (
+    build_citation_index,
+    entry_citation_key,
+    persist_report_run,
+    resolve_cited_entries,
+)
+from status.skills.synthesizer import (
+    build_dry_run_markdown,
+    build_synthesis_input,
+    default_report_filename,
+    normalize_evidence,
+    restore_markdown_structure,
+    sanitize_report_markdown,
+    strip_gap_commentary,
+)
+from status.skills.schemas import (
+    SynthesisEntry,
+    SynthesisFlag,
+    SynthesisInput,
+    SynthesisOutput,
+    SynthesisParticipation,
+)
+
+
+def test_default_report_filename_matches_weekly_status_convention() -> None:
+    assert default_report_filename(date(2026, 8, 14)) == "status-2026-08-14.md"
+
+
+def test_entry_citation_key_uses_unticketed_when_no_epic() -> None:
+    entry = MagicMock(person_id="pilot", epic_key=None)
+    assert entry_citation_key(entry) == "pilot:unticketed"
+
+
+def test_build_synthesis_input_uses_display_names_and_omits_review_flags() -> None:
+    session = MagicMock()
+    week = date(2026, 8, 14)
+    person = Person(person_id="pilot", display_name="Pilot User")
+    entry = StatusEntry(
+        entry_id=uuid4(),
+        week_ending=week,
+        person_id="pilot",
+        project="EET",
+        epic_key="EET-5493",
+        epic_name_snapshot="Cluster Bot",
+        state="progressing",
+        outcome="Shipped destroy command.",
+        source="drafted",
+        evidence=["EET-5500"],
+        confirmed_at=datetime.now(timezone.utc),
+    )
+    quiet_entry = StatusEntry(
+        entry_id=uuid4(),
+        week_ending=week,
+        person_id="pilot",
+        project="EET",
+        state="quiet",
+        outcome="No activity.",
+        source="drafted",
+        evidence=["EET-5501"],
+        confirmed_at=datetime.now(timezone.utc),
+    )
+    participation = Participation(person_id="pilot", week_ending=week, status="confirmed")
+
+    with patch("status.skills.synthesizer.get_confirmed_entries_for_week", return_value=[entry, quiet_entry]):
+        with patch("status.skills.synthesizer.get_participation_for_week", return_value=[participation]):
+            with patch("status.skills.synthesizer.get_person", return_value=person):
+                payload = build_synthesis_input(session, week)
+
+    assert len(payload.entries) == 1
+    assert payload.entries[0].display_name == "Pilot User"
+    assert "https://issues.redhat.com/browse/EET-5500" in payload.entries[0].evidence
+    assert payload.participation[0].display_name == "Pilot User"
+    assert payload.flags == []
+
+
+def test_normalize_evidence_adds_jira_urls() -> None:
+    evidence = normalize_evidence(["EET-5500", "https://github.com/org/repo/pull/1"])
+    assert evidence == [
+        "EET-5500",
+        "https://issues.redhat.com/browse/EET-5500",
+        "https://github.com/org/repo/pull/1",
+    ]
+
+
+def test_build_dry_run_markdown_includes_confirmed_entries() -> None:
+    week = date(2026, 8, 14)
+    payload = SynthesisInput(
+        week_ending=week.isoformat(),
+        entries=[
+            SynthesisEntry(
+                person_id="pilot",
+                display_name="Pilot User",
+                project="EET",
+                epic_key="EET-5493",
+                epic_name="Cluster Bot",
+                state="progressing",
+                outcome="Shipped destroy command.",
+                evidence=["EET-5500"],
+            )
+        ],
+        participation=[
+            SynthesisParticipation(
+                person_id="pilot",
+                display_name="Pilot User",
+                status="confirmed",
+            )
+        ],
+        flags=[
+            SynthesisFlag(message="No calendar signal this week.", person_id="pilot"),
+        ],
+    )
+    markdown = build_dry_run_markdown(payload, week, reason="Dry-run")
+    assert "**Cluster Bot** (Pilot User) - Shipped destroy command." in markdown
+    assert "## Flags" in markdown
+    assert "_Input: 1 entries" in markdown
+
+
+def test_sanitize_report_markdown_repairs_bare_paren_jira_urls() -> None:
+    payload = SynthesisInput(
+        week_ending="2026-08-14",
+        entries=[
+            SynthesisEntry(
+                person_id="pilot",
+                display_name="Pilot User",
+                project="EET",
+                epic_key="EET-5493",
+                epic_name="Cluster Bot",
+                state="shipped",
+                outcome="Closed bot work.",
+                evidence=["EET-5493", "EET-5499"],
+                evidence_labels={
+                    "EET-5493": "Cluster Bot",
+                    "EET-5499": "scheduling improvements",
+                },
+            )
+        ],
+    )
+    raw = (
+        "Closed nine of eleven (https://issues.redhat.com/browse/EET-5493) — "
+        "[Slack integration](https://issues.redhat.com/browse/EET-5494); "
+        "additional (https://issues.redhat.com/browse/EET-5499) also closed."
+    )
+    cleaned = sanitize_report_markdown(raw, payload)
+    assert "[Cluster Bot](https://issues.redhat.com/browse/EET-5493)" in cleaned
+    assert "[scheduling improvements](https://issues.redhat.com/browse/EET-5499)" in cleaned
+    assert "[Slack integration](https://issues.redhat.com/browse/EET-5494)" in cleaned
+    assert re.search(r"(?<!\])\(https://issues\.redhat\.com/browse/EET-5493\)", cleaned) is None
+
+
+def test_sanitize_report_markdown_unwraps_empty_links_and_drops_notes() -> None:
+    raw = (
+        "Support for [ITRS] and [SAS] remains waiting.\n\n"
+        "## Notes\n\n* Flagging for confirmation."
+    )
+    cleaned = sanitize_report_markdown(raw)
+    assert "ITRS" in cleaned and "[ITRS]" not in cleaned
+    assert "## Notes" not in cleaned
+
+
+def test_restore_markdown_structure_inserts_section_breaks() -> None:
+    raw = "# Aug 14, 2026 ## Partner Enablement * **IBM** - Did work."
+    cleaned = restore_markdown_structure(raw)
+    assert "## Partner Enablement" in cleaned
+    assert cleaned.index("## Partner Enablement") > cleaned.index("# Aug 14, 2026")
+    assert "\n* **IBM**" in cleaned
+
+
+def test_sanitize_report_markdown_repairs_github_paren_urls() -> None:
+    payload = SynthesisInput(
+        week_ending="2026-08-14",
+        entries=[
+            SynthesisEntry(
+                person_id="pilot",
+                display_name="Pilot User",
+                project="EET",
+                epic_key="EET-5493",
+                epic_name="Cluster Bot",
+                state="shipped",
+                outcome="Merged PRs.",
+                evidence=["https://github.com/org/repo/pull/26"],
+            )
+        ],
+    )
+    raw = "Merged via (https://github.com/org/repo/pull/26)."
+    cleaned = sanitize_report_markdown(raw, payload)
+    assert "[PR #26](https://github.com/org/repo/pull/26)" in cleaned
+    assert re.search(r"(?<!\])\(\s*https://github\.com", cleaned) is None
+
+
+def test_sanitize_report_markdown_strips_gap_commentary() -> None:
+    raw = (
+        "* **OpenShift Cluster Management Bot** - Merged [PR #30](https://github.com/org/repo/pull/30); "
+        "this work has no linked Jira tickets despite three PRs merging this week."
+    )
+    cleaned = sanitize_report_markdown(raw)
+    assert "no linked Jira tickets" not in cleaned
+    assert "despite three PRs merging this week" not in cleaned
+    assert "Merged [PR #30]" in cleaned
+
+
+def test_strip_gap_commentary_removes_audit_phrases() -> None:
+    text = (
+        "* **Tailscale** - Continued work; no linked commits or PRs were found this week."
+    )
+    assert "no linked commits or PRs" not in strip_gap_commentary(text)
+
+
+def test_resolve_cited_entries_accepts_person_epic_keys() -> None:
+    week = date(2026, 8, 14)
+    entry = StatusEntry(
+        entry_id=uuid4(),
+        week_ending=week,
+        person_id="pilot",
+        project="EET",
+        epic_key="EET-5493",
+        state="shipped",
+        outcome="Done.",
+        source="drafted",
+        evidence=[],
+        confirmed_at=datetime.now(timezone.utc),
+    )
+    index = build_citation_index([entry])
+    resolved = resolve_cited_entries(["pilot:EET-5493"], index, [entry])
+    assert len(resolved) == 1
+    assert resolved[0].entry_id == entry.entry_id
+
+
+def test_persist_report_run_supersedes_previous_and_links_entries() -> None:
+    session = MagicMock()
+    week = date(2026, 8, 14)
+    entry = StatusEntry(
+        entry_id=uuid4(),
+        week_ending=week,
+        person_id="pilot",
+        project="EET",
+        epic_key="EET-5493",
+        state="shipped",
+        outcome="Done.",
+        source="drafted",
+        evidence=[],
+        confirmed_at=datetime.now(timezone.utc),
+    )
+    output = SynthesisOutput(
+        week_ending=week.isoformat(),
+        markdown="# Aug 14, 2026",
+        sections_used=["Partner Enablement"],
+        entries_cited=["pilot:EET-5493"],
+        non_responders=[],
+        asks=[],
+    )
+
+    added: list[object] = []
+
+    def _add(obj: object) -> None:
+        added.append(obj)
+        if isinstance(obj, ReportRun):
+            obj.run_id = uuid4()
+
+    session.add.side_effect = _add
+    session.flush.side_effect = lambda: None
+
+    run = persist_report_run(
+        session,
+        week,
+        output,
+        prompt_version="weekly-status-synthesizer@latest",
+        model="claude-sonnet-5",
+        confirmed_entries=[entry],
+        output_uri="status-2026-08-14.md",
+        delivered=True,
+    )
+
+    assert run.output_uri == "status-2026-08-14.md"
+    assert run.delivered_at is not None
+    session.execute.assert_called_once()
+    assert any(isinstance(obj, ReportRun) for obj in added)
+    assert len([obj for obj in added if obj.__class__.__name__ == "ReportEntry"]) == 1
+
+
+def test_synthesize_report_deliver_requires_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    from status.config import Settings
+    from status.skills import synthesizer as synth_module
+
+    settings = Settings(
+        DATABASE_URL="postgresql+psycopg://localhost/weekly_status",
+        SYNTHESIZER_SKILL_ID="skill_test",
+    )
+    monkeypatch.setattr(synth_module, "get_settings", lambda: settings)
+
+    session = MagicMock()
+    with patch("status.db.get_session") as session_cm:
+        session_cm.return_value.__enter__.return_value = session
+        session_cm.return_value.__exit__.return_value = None
+        with patch.object(synth_module, "get_confirmed_entries_for_week", return_value=[]):
+            with patch.object(synth_module, "build_synthesis_input") as build_mock:
+                from status.skills.schemas import SynthesisInput, SynthesisOutput
+
+                build_mock.return_value = SynthesisInput(
+                    week_ending="2026-08-14",
+                    entries=[],
+                    participation=[],
+                    flags=[],
+                )
+                with patch.object(synth_module, "run_synthesizer_from_payload") as run_mock:
+                    run_mock.return_value = SynthesisOutput(
+                        week_ending="2026-08-14",
+                        markdown="# report",
+                    )
+                    with pytest.raises(RuntimeError, match="REPORT_CHANNEL_ID"):
+                        synth_module.synthesize_report(
+                            date(2026, 8, 14),
+                            dry_run=False,
+                            deliver=True,
+                            settings=settings,
+                        )

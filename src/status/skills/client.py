@@ -149,6 +149,11 @@ class SkillClient:
                     log.warning("%s follow-up requires code execution; retrying", skill.skill_id)
                     continue
                 raise SkillError(f"{skill.skill_id} follow-up rejected: {exc}") from exc
+            except SkillError as exc:
+                if not code_execution and "code execution" in str(exc).lower():
+                    log.warning("%s follow-up requires code execution; retrying", skill.skill_id)
+                    continue
+                raise
 
             follow_up = self._resume_to_completion(
                 messages,
@@ -213,7 +218,11 @@ class SkillClient:
         try:
             return self._client.beta.messages.create(**kwargs)
         except self._anthropic.BadRequestError as exc:
-            if "skill" in str(exc).lower():
+            message = str(exc).lower()
+            # Skills require code execution; callers may retry with tools enabled.
+            if "code execution" in message:
+                raise
+            if "skill" in message:
                 raise SkillError(f"skill rejected: {exc}") from exc
             raise
 
@@ -249,6 +258,8 @@ def _should_json_follow_up(message: str) -> bool:
             "no text output",
             "non-JSON output",
             "failed validation",
+            "schema violation",
+            "validation error",
         )
     )
 

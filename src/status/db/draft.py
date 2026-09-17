@@ -99,6 +99,8 @@ def _entry_extra(entry: DraftEntry) -> dict[str, Any]:
     extra: dict[str, Any] = {}
     if entry.why_flagged:
         extra["why_flagged"] = entry.why_flagged
+    if entry.evidence_labels:
+        extra["evidence_labels"] = dict(entry.evidence_labels)
     return extra
 
 
