@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/name: weekly-status
     app.kubernetes.io/component: automation
 spec:
-  schedule: "0 14 * * 1"  # Monday 09:00 ET
+  schedule: "0 9 * * 1"  # Monday 09:00 ET (with timeZone below)
   timeZone: "America/New_York"
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -29,7 +29,12 @@ spec:
             - name: lock-and-report
               image: quay.io/opdev/weekly-status:latest
               imagePullPolicy: Always
-              command: ["sh", "-c", "set -eu && status run-week lock-and-report --week auto --deliver"]
+              command:
+                [
+                  "sh",
+                  "-c",
+                  "set -eu && status run-week lock-and-report --week auto --persist --deliver",
+                ]
               envFrom:
                 - secretRef:
                     name: weekly-status-secrets
