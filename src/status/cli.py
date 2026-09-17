@@ -422,7 +422,22 @@ def batch_nudge(
 def batch_lock_and_report(
     week: Annotated[Optional[str], typer.Option("--week", "-w")] = "auto",
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
-    deliver: Annotated[bool, typer.Option("--deliver")] = True,
+    deliver: Annotated[
+        bool,
+        typer.Option("--deliver/--no-deliver", help="Post markdown to REPORT_CHANNEL_ID"),
+    ] = True,
+    persist: Annotated[
+        bool,
+        typer.Option("--persist/--no-persist", help="Write report_run audit rows to Postgres"),
+    ] = True,
+    output: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--output",
+            "-o",
+            help="Write markdown report to file (default: status-YYYY-MM-DD.md when persisting or delivering)",
+        ),
+    ] = None,
 ) -> None:
     """Expire unconfirmed drafts, synthesize report, deliver to Slack. Monday 09:00 ET automation."""
     from status.collectors.payload import resolve_week_ending
@@ -430,45 +445,36 @@ def batch_lock_and_report(
 
     _dry_run_flag(dry_run)
     week_ending = resolve_week_ending(week)
-    settings = get_settings()
 
-    with get_session() as session:
-        # Step 1: Expire unconfirmed
-        if not dry_run:
+    if not dry_run:
+        with get_session() as session:
             expired_count = expire_unconfirmed_participations(session, week_ending)
             session.commit()
-            console.print(f"Expired {expired_count} unconfirmed participations")
-        else:
-            console.print("[dim]Would expire unconfirmed participations[/]")
+        console.print(f"Expired {expired_count} unconfirmed participations")
+    else:
+        console.print("[dim]Would expire unconfirmed participations[/]")
 
-        # Step 2: Synthesize report
-        result = run_synthesizer(session, week_ending, dry_run=dry_run)
-        console.print("\n--- Report Preview ---")
-        console.print(result.markdown[:500] + "..." if len(result.markdown) > 500 else result.markdown)
+    write_file = output
+    if write_file is None and (persist or deliver) and not dry_run:
+        write_file = Path(default_report_filename(week_ending))
 
-        # Step 3: Deliver to Slack channel
-        if deliver and not dry_run:
-            if not settings.report_channel_id:
-                console.print("[yellow]REPORT_CHANNEL_ID not set, skipping delivery[/]")
-            elif not settings.slack_bot_token:
-                console.print("[red]SLACK_BOT_TOKEN not set[/]")
-                raise typer.Exit(1)
-            else:
-                from status.slack.send import post_report_to_channel
+    result = synthesize_report(
+        week_ending,
+        dry_run=dry_run,
+        persist=persist and not dry_run,
+        deliver=deliver and not dry_run,
+        output_path=write_file,
+    )
 
-                delivery_result = post_report_to_channel(
-                    result.markdown,
-                    week_ending,
-                    bot_token=settings.slack_bot_token,
-                    channel_id=settings.report_channel_id,
-                )
-                console.print(
-                    f"[green]Report delivered to Slack channel {delivery_result['channel']}[/]"
-                )
-        elif deliver and dry_run:
-            console.print("[dim]Would deliver report to Slack channel[/]")
-        else:
-            console.print("[dim]Delivery skipped (--no-deliver)[/]")
+    preview = result.markdown[:500] + "..." if len(result.markdown) > 500 else result.markdown
+    console.print("\n--- Report Preview ---")
+    console.print(preview)
+    if write_file:
+        console.print(f"Wrote report to {write_file}")
+    if deliver and dry_run:
+        console.print("[dim]Would deliver report to REPORT_CHANNEL_ID[/]")
+    elif not deliver:
+        console.print("[dim]Delivery skipped (--no-deliver)[/]")
 
 
 if __name__ == "__main__":
