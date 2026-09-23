@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 from pydantic import BaseModel, ValidationError
 
 from status.collectors.http import HttpError, request_json
+from status.skills.json_output import extract_json_object
 
 log = logging.getLogger(__name__)
 class OpenAISkillError(RuntimeError):
@@ -289,9 +290,11 @@ class OpenAISkillsClient:
         text = _extract_output_text(response)
         if not text:
             raise OpenAISkillError(f"{skill.skill_id} returned no text output")
+        cleaned = extract_json_object(text)
         try:
-            raw = json.loads(text)
+            raw = json.loads(cleaned)
         except json.JSONDecodeError as exc:
+            log.error("unparseable OpenAI skill output from %s: %.500s", skill.skill_id, text)
             raise OpenAISkillError(f"{skill.skill_id} returned non-JSON output") from exc
         try:
             return schema.model_validate(raw)

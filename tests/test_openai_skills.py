@@ -105,3 +105,60 @@ def test_invoke_json_mounts_pinned_skill_and_requests_structured_output() -> Non
     ]
     assert body["text"]["format"]["type"] == "json_schema"
     assert body["text"]["format"]["strict"] is True
+
+
+def test_invoke_json_accepts_fenced_json_output() -> None:
+    response = {
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": '```json\n{"name":"weekly","note":null,"tags":[]}\n```',
+                    }
+                ],
+            }
+        ],
+    }
+    client = OpenAISkillsClient("test-key", model="gpt-test")
+
+    with patch("status.skills.openai_skills.request_json", return_value=response):
+        result = client.invoke_json(
+            OpenAISkillRef("skill_123"),
+            {"week": "2026-09-18"},
+            "Return JSON.",
+            ExampleOutput,
+        )
+
+    assert result == ExampleOutput(name="weekly", note=None, tags=[])
+
+
+def test_invoke_json_extracts_json_from_extra_message_text() -> None:
+    response = {
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {"type": "output_text", "text": "Completed the hosted skill."},
+                    {
+                        "type": "output_text",
+                        "text": '{"name":"weekly","note":null,"tags":[]}',
+                    },
+                ],
+            }
+        ],
+    }
+    client = OpenAISkillsClient("test-key", model="gpt-test")
+
+    with patch("status.skills.openai_skills.request_json", return_value=response):
+        result = client.invoke_json(
+            OpenAISkillRef("skill_123"),
+            {"week": "2026-09-18"},
+            "Return JSON.",
+            ExampleOutput,
+        )
+
+    assert result == ExampleOutput(name="weekly", note=None, tags=[])
