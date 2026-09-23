@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -14,21 +14,22 @@ from status.db.report import (
     persist_report_run,
     resolve_cited_entries,
 )
-from status.skills.synthesizer import (
-    build_dry_run_markdown,
-    build_synthesis_input,
-    default_report_filename,
-    normalize_evidence,
-    restore_markdown_structure,
-    sanitize_report_markdown,
-    strip_gap_commentary,
-)
 from status.skills.schemas import (
     SynthesisEntry,
     SynthesisFlag,
     SynthesisInput,
     SynthesisOutput,
     SynthesisParticipation,
+)
+from status.skills.synthesizer import (
+    build_dry_run_markdown,
+    build_synthesis_input,
+    default_report_filename,
+    limit_visible_github_links,
+    normalize_evidence,
+    restore_markdown_structure,
+    sanitize_report_markdown,
+    strip_gap_commentary,
 )
 
 
@@ -56,7 +57,7 @@ def test_build_synthesis_input_uses_display_names_and_omits_review_flags() -> No
         outcome="Shipped destroy command.",
         source="drafted",
         evidence=["EET-5500"],
-        confirmed_at=datetime.now(timezone.utc),
+        confirmed_at=datetime.now(UTC),
     )
     quiet_entry = StatusEntry(
         entry_id=uuid4(),
@@ -67,17 +68,27 @@ def test_build_synthesis_input_uses_display_names_and_omits_review_flags() -> No
         outcome="No activity.",
         source="drafted",
         evidence=["EET-5501"],
-        confirmed_at=datetime.now(timezone.utc),
+        confirmed_at=datetime.now(UTC),
     )
     participation = Participation(person_id="pilot", week_ending=week, status="confirmed")
 
-    with patch("status.skills.synthesizer.get_confirmed_entries_for_week", return_value=[entry, quiet_entry]):
-        with patch("status.skills.synthesizer.get_participation_for_week", return_value=[participation]):
-            with patch("status.skills.synthesizer.get_person", return_value=person):
-                payload = build_synthesis_input(session, week)
+    with (
+        patch(
+            "status.skills.synthesizer.get_confirmed_entries_for_week",
+            return_value=[entry, quiet_entry],
+        ),
+        patch(
+            "status.skills.synthesizer.get_participation_for_week",
+            return_value=[participation],
+        ),
+        patch("status.skills.synthesizer.get_person", return_value=person),
+    ):
+        payload = build_synthesis_input(session, week)
 
     assert len(payload.entries) == 1
     assert payload.entries[0].display_name == "Pilot User"
+    assert payload.entries[0].report_category == "Certification / CI"
+    assert payload.entries[0].report_name == "Cluster Bot"
     assert "https://issues.redhat.com/browse/EET-5500" in payload.entries[0].evidence
     assert payload.participation[0].display_name == "Pilot User"
     assert payload.flags == []
@@ -106,6 +117,8 @@ def test_build_dry_run_markdown_includes_confirmed_entries() -> None:
                 state="progressing",
                 outcome="Shipped destroy command.",
                 evidence=["EET-5500"],
+                report_category="Certification / CI",
+                report_name="Cluster Bot",
             )
         ],
         participation=[
@@ -142,6 +155,8 @@ def test_sanitize_report_markdown_repairs_bare_paren_jira_urls() -> None:
                     "EET-5493": "Cluster Bot",
                     "EET-5499": "scheduling improvements",
                 },
+                report_category="Certification / CI",
+                report_name="Cluster Bot",
             )
         ],
     )
@@ -188,13 +203,57 @@ def test_sanitize_report_markdown_repairs_github_paren_urls() -> None:
                 state="shipped",
                 outcome="Merged PRs.",
                 evidence=["https://github.com/org/repo/pull/26"],
+                report_category="Certification / CI",
+                report_name="Cluster Bot",
             )
         ],
     )
     raw = "Merged via (https://github.com/org/repo/pull/26)."
     cleaned = sanitize_report_markdown(raw, payload)
-    assert "[PR #26](https://github.com/org/repo/pull/26)" in cleaned
+    assert "[implementation change](https://github.com/org/repo/pull/26)" in cleaned
     assert re.search(r"(?<!\])\(\s*https://github\.com", cleaned) is None
+
+
+def test_sanitize_report_markdown_replaces_raw_pr_label_with_outcome_phrase() -> None:
+    url = "https://github.com/opdev/agentic-status-report/pull/27"
+    payload = SynthesisInput(
+        week_ending="2026-09-18",
+        entries=[
+            SynthesisEntry(
+                person_id="yoza",
+                display_name="Yash Oza",
+                project="opdev/agentic-status-report",
+                epic_name="Agentic Weekly Status Pipeline",
+                state="progressing",
+                outcome=f"Continued [wiring lock-and-report]({url}) through synthesis.",
+                evidence=[url],
+                report_category="Partner Enablement",
+                report_name="Partner Labs",
+            )
+        ],
+    )
+
+    cleaned = sanitize_report_markdown(
+        f"* **Partner Labs** - Continued [PR #27]({url}) through synthesis.",
+        payload,
+    )
+
+    assert f"[wiring lock-and-report]({url})" in cleaned
+    assert "PR #27" not in cleaned
+
+
+def test_limit_visible_github_links_keeps_only_two_per_bullet() -> None:
+    raw = (
+        "* **Test Suite** - fixed "
+        "[lease cleanup](https://github.com/org/repo/pull/1), "
+        "[TTL handling](https://github.com/org/repo/pull/2), and "
+        "[pull secrets](https://github.com/org/repo/pull/3)."
+    )
+
+    cleaned = limit_visible_github_links(raw)
+
+    assert cleaned.count("https://github.com") == 2
+    assert "and pull secrets." in cleaned
 
 
 def test_sanitize_report_markdown_strips_gap_commentary() -> None:
@@ -205,7 +264,7 @@ def test_sanitize_report_markdown_strips_gap_commentary() -> None:
     cleaned = sanitize_report_markdown(raw)
     assert "no linked Jira tickets" not in cleaned
     assert "despite three PRs merging this week" not in cleaned
-    assert "Merged [PR #30]" in cleaned
+    assert "Merged [implementation change]" in cleaned
 
 
 def test_strip_gap_commentary_removes_audit_phrases() -> None:
@@ -227,7 +286,7 @@ def test_resolve_cited_entries_accepts_person_epic_keys() -> None:
         outcome="Done.",
         source="drafted",
         evidence=[],
-        confirmed_at=datetime.now(timezone.utc),
+        confirmed_at=datetime.now(UTC),
     )
     index = build_citation_index([entry])
     resolved = resolve_cited_entries(["pilot:EET-5493"], index, [entry])
@@ -248,7 +307,7 @@ def test_persist_report_run_supersedes_previous_and_links_entries() -> None:
         outcome="Done.",
         source="drafted",
         evidence=[],
-        confirmed_at=datetime.now(timezone.utc),
+        confirmed_at=datetime.now(UTC),
     )
     output = SynthesisOutput(
         week_ending=week.isoformat(),
@@ -301,25 +360,27 @@ def test_synthesize_report_deliver_requires_channel(monkeypatch: pytest.MonkeyPa
     with patch("status.db.get_session") as session_cm:
         session_cm.return_value.__enter__.return_value = session
         session_cm.return_value.__exit__.return_value = None
-        with patch.object(synth_module, "get_confirmed_entries_for_week", return_value=[]):
-            with patch.object(synth_module, "build_synthesis_input") as build_mock:
-                from status.skills.schemas import SynthesisInput, SynthesisOutput
+        with (
+            patch.object(synth_module, "get_confirmed_entries_for_week", return_value=[]),
+            patch.object(synth_module, "build_synthesis_input") as build_mock,
+            patch.object(synth_module, "run_synthesizer_from_payload") as run_mock,
+        ):
+            from status.skills.schemas import SynthesisInput, SynthesisOutput
 
-                build_mock.return_value = SynthesisInput(
-                    week_ending="2026-08-14",
-                    entries=[],
-                    participation=[],
-                    flags=[],
+            build_mock.return_value = SynthesisInput(
+                week_ending="2026-08-14",
+                entries=[],
+                participation=[],
+                flags=[],
+            )
+            run_mock.return_value = SynthesisOutput(
+                week_ending="2026-08-14",
+                markdown="# report",
+            )
+            with pytest.raises(RuntimeError, match="REPORT_CHANNEL_ID"):
+                synth_module.synthesize_report(
+                    date(2026, 8, 14),
+                    dry_run=False,
+                    deliver=True,
+                    settings=settings,
                 )
-                with patch.object(synth_module, "run_synthesizer_from_payload") as run_mock:
-                    run_mock.return_value = SynthesisOutput(
-                        week_ending="2026-08-14",
-                        markdown="# report",
-                    )
-                    with pytest.raises(RuntimeError, match="REPORT_CHANNEL_ID"):
-                        synth_module.synthesize_report(
-                            date(2026, 8, 14),
-                            dry_run=False,
-                            deliver=True,
-                            settings=settings,
-                        )

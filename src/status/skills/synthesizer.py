@@ -11,26 +11,27 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from status.config import Settings, get_settings
-from status.db.report import persist_report_run
+from status.db.models import StatusEntry
 from status.db.repo import (
     get_confirmed_entries_for_week,
     get_participation_for_week,
     get_person,
 )
+from status.db.report import persist_report_run
 from status.skills.evidence import (
     JIRA_BROWSE_RE,
     JIRA_KEY_RE,
     jira_keys_from_evidence,
     merge_evidence_labels,
 )
-from status.skills.skill_invoke import invoke_skill_json, skill_provider
+from status.skills.report_style import classify_report_entry
 from status.skills.schemas import (
     SynthesisEntry,
-    SynthesisFlag,
     SynthesisInput,
     SynthesisOutput,
     SynthesisParticipation,
 )
+from status.skills.skill_invoke import invoke_skill_json, skill_provider
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +51,11 @@ PAREN_JIRA_URL_RE = re.compile(
 )
 PAREN_GITHUB_URL_RE = re.compile(r"(?<!\])\(\s*(https://github\.com/[^\s)]+)\s*\)")
 EMPTY_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\](?!\()")
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+RAW_PR_LINK_RE = re.compile(
+    r"\[(?:PR|pull request)\s*#?\d+\]\((https://github\.com/[^)]+/pull/\d+)\)",
+    re.IGNORECASE,
+)
 NOTES_SECTION_RE = re.compile(r"\n## Notes\s*\n.*\Z", re.DOTALL)
 GAP_COMMENTARY_RES = [
     re.compile(r";\s*this work has no linked Jira tickets despite[^.;]*\.?", re.IGNORECASE),
@@ -103,17 +109,42 @@ def build_jira_link_phrases(payload: SynthesisInput) -> dict[str, str]:
 def build_github_link_phrases(payload: SynthesisInput) -> dict[str, str]:
     phrases: dict[str, str] = {}
     for entry in payload.entries:
+        for label, url in MARKDOWN_LINK_RE.findall(entry.outcome):
+            if "github.com" in url.lower() and not re.fullmatch(
+                r"(?:PR|pull request)\s*#?\d+", label, re.IGNORECASE
+            ):
+                phrases[url] = label.strip()
         for item in entry.evidence:
             if "github.com" not in item.lower():
                 continue
             if item in phrases:
                 continue
             if "/pull/" in item:
-                pr_num = item.rstrip("/").split("/")[-1]
-                phrases[item] = f"PR #{pr_num}"
+                phrases[item] = "implementation change"
             else:
                 phrases[item] = "change"
     return phrases
+
+
+def limit_visible_github_links(text: str, *, maximum: int = 2) -> str:
+    """Keep the audit trail intact while limiting links shown in each report bullet."""
+    lines: list[str] = []
+    for line in text.splitlines():
+        if not line.lstrip().startswith("*"):
+            lines.append(line)
+            continue
+        seen = 0
+
+        def replace(match: re.Match[str]) -> str:
+            nonlocal seen
+            label, url = match.groups()
+            if "github.com" not in url.lower():
+                return match.group(0)
+            seen += 1
+            return match.group(0) if seen <= maximum else label
+
+        lines.append(MARKDOWN_LINK_RE.sub(replace, line))
+    return "\n".join(lines)
 
 
 def _collapse_punctuation(text: str) -> str:
@@ -168,6 +199,12 @@ def sanitize_report_markdown(markdown: str, payload: SynthesisInput | None = Non
 
     cleaned = PAREN_JIRA_URL_RE.sub(replace_paren_jira, markdown)
     cleaned = PAREN_GITHUB_URL_RE.sub(replace_paren_github, cleaned)
+    cleaned = RAW_PR_LINK_RE.sub(
+        lambda match: f"[{github_phrases.get(match.group(1), 'implementation change')}]"
+        f"({match.group(1)})",
+        cleaned,
+    )
+    cleaned = limit_visible_github_links(cleaned)
     cleaned = EMPTY_MARKDOWN_LINK_RE.sub(r"\1", cleaned)
     cleaned = NOTES_SECTION_RE.sub("", cleaned)
     cleaned = strip_gap_commentary(cleaned)
@@ -183,7 +220,7 @@ def _person_display_name(session: Session, person_id: str) -> str:
     return person_id
 
 
-def _missing_jira_keys_for_entries(entries: list) -> list[str]:
+def _missing_jira_keys_for_entries(entries: list[StatusEntry]) -> list[str]:
     missing: set[str] = set()
     for entry in entries:
         stored = set(((entry.extra or {}).get("evidence_labels") or {}).keys())
@@ -203,7 +240,7 @@ def _fetch_missing_issue_summaries(keys: list[str], settings: Settings) -> dict[
     except JiraCollectorError as exc:
         log.warning("could not fetch Jira summaries for evidence labels: %s", exc)
         return {}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - report generation must survive enrichment failure
         log.warning("unexpected error fetching Jira summaries: %s", exc)
         return {}
 
@@ -233,6 +270,11 @@ def build_synthesis_input(
             epic_key=entry.epic_key,
             epic_name=entry.epic_name_snapshot,
         )
+        report_category, report_name = classify_report_entry(
+            project=entry.project,
+            epic_name=entry.epic_name_snapshot,
+            outcome=entry.outcome,
+        )
         synthesis_entries.append(
             SynthesisEntry(
                 person_id=entry.person_id,
@@ -246,6 +288,8 @@ def build_synthesis_input(
                 ask=entry.ask,
                 evidence=normalize_evidence(entry.evidence or []),
                 evidence_labels=evidence_labels,
+                report_category=report_category,
+                report_name=report_name,
             )
         )
 
@@ -290,17 +334,20 @@ def build_dry_run_markdown(
     else:
         by_project: dict[str, list[SynthesisEntry]] = defaultdict(list)
         for entry in payload.entries:
-            by_project[entry.project].append(entry)
+            by_project[entry.report_category].append(entry)
 
-        for project in sorted(by_project):
-            lines.append(f"## {project}")
+        for category in ("Partner Enablement", "Certification / CI", "Mindshare"):
+            if category not in by_project:
+                continue
+            lines.append(f"## {category}")
             lines.append("")
             for entry in sorted(
-                by_project[project],
-                key=lambda row: (row.epic_name or "", row.display_name),
+                by_project[category],
+                key=lambda row: (row.report_name, row.display_name),
             ):
-                name = entry.epic_name or project
-                lines.append(f"* **{name}** ({entry.display_name}) - {entry.outcome}")
+                lines.append(
+                    f"* **{entry.report_name}** ({entry.display_name}) - {entry.outcome}"
+                )
             lines.append("")
 
     expired = sorted(

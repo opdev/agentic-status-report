@@ -30,7 +30,9 @@ source data.
     "blocker": "string | null",
     "ask": "string | null",
     "evidence": ["EET-4853", "https://github.com/..."],
-    "evidence_labels": {"EET-4853": "hosted pipeline failure"}
+    "evidence_labels": {"EET-4853": "hosted pipeline failure"},
+    "report_category": "Partner Enablement | Certification / CI | Mindshare",
+    "report_name": "legacy-compatible management-facing initiative name"
   }],
   "participation": [{
     "person_id": "string",
@@ -64,6 +66,14 @@ Date format: `Aug 14, 2026` (month abbreviation, day, year).
 
 ## Categorization rules
 
+`report_category` and `report_name` are authoritative metadata assigned before
+synthesis. Put each entry under its supplied `report_category` and use its
+supplied `report_name` as the bold bullet label. Do not reclassify an entry or
+replace the label with a repository, epic, or person name.
+
+The following definitions explain the taxonomy for writing and rollup; they are
+not permission to override the supplied metadata.
+
 Assign each entry to exactly one main section:
 
 - **Partner Enablement** — work directly with partners/customers on their specific projects or deployments
@@ -78,8 +88,6 @@ Assign each entry to exactly one main section:
 Special routing:
 - Anything regarding Red Hat Marketplace → **CI Pipeline** subsection
 - Anything related to TSSC (Trusted Software Supply Chain) → **Red Hat Developer Hub** in Certification/CI
-
-Use `epic_name` as the bold inline name when available. Fall back to `project` or a sensible subsection name.
 
 **Subcategory normalization** (match legacy `parse_and_format.py` behavior):
 
@@ -113,17 +121,31 @@ Use `epic_name` as the bold inline name when available. Fall back to `project` o
   - Good: `Provided a workaround for [multi image provisioning issue](https://issues.redhat.com/browse/EET-5174)...`
   - Ticket IDs should ONLY appear in hyperlink URLs
 - Jira links on noun phrases, not verbs: `investigated [hosted pipeline failure](url)` not `investigated hosted pipeline failure`
-- GitHub links on "PR" or descriptive noun phrase
-- Abbreviate "pull request" as "PR"; prefix numbers with `#` (e.g., `PR #104`)
+- GitHub links belong on a descriptive phrase that explains the work, never on
+  a bare `PR #104` label.
+- Do not enumerate implementation artifacts for management. Mention at most two
+  visible evidence links in one bullet, even when the entry contains many URLs.
+- Prefer a Jira initiative link over individual PR links when it supports the
+  same statement. Otherwise select the one or two PRs that best represent the
+  outcome.
+- Preserve all unused URLs in the input evidence/audit trail; omission from the
+  visible Markdown does not discard evidence.
 - Capitalize: Helm, Operator
 - Be concise; past tense for completed work
 - Include context where present in source `outcome` text
+- Lead with the concrete action and technical subject, not repository mechanics.
+  Translate "merged five PRs" into what those changes did, using only details
+  already present in the confirmed outcomes.
+- Avoid vague standalone phrases such as "worked on", "tracked", or "advanced
+  discussions". When the source contains the detail, name the specific problem,
+  decision, component, result, or remaining state.
 
 ## Evidence and hyperlinks
 
 - Build Jira URLs: `https://issues.redhat.com/browse/{KEY}` for Red Hat Jira keys
 - Use `evidence` array URLs directly for GitHub links
-- Every hyperlink from source evidence must appear in the output
+- Evidence is an audit set, not a display checklist. Show only the primary one
+  or two links needed to substantiate the management-facing sentence.
 - Do not invent URLs not present in evidence
 - For Jira keys, use `evidence_labels[KEY]` as the link text when present (mid-sentence noun phrase)
 - When `evidence_labels` is missing for a key, derive link text only from words already in `outcome` — do not invent titles

@@ -113,6 +113,13 @@ links** for Jira tickets and PRs:
 
 Rules:
 
+- Preserve concrete technical nouns, components, observed behavior, decisions,
+  and remaining state from ticket descriptions and comments. Do not reduce a
+  specific problem to "worked on integration issues" or "advanced discussions."
+- Describe what the work did; do not use merge counts or a list of PR numbers as
+  the outcome. PR URLs remain evidence even when the sentence summarizes their
+  combined purpose.
+
 - Do **not** use bare milestone numbers (`M4`, `M5`, `m3.5`) as shorthand —
   use the ticket summary as link text (drop the `M5:` prefix when it is only a
   label, not the work description).
