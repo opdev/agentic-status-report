@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import logging
-import re
 import uuid
 import zipfile
 from dataclasses import dataclass
@@ -19,9 +18,6 @@ from pydantic import BaseModel, ValidationError
 from status.collectors.http import request_json
 
 log = logging.getLogger(__name__)
-FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
-
-
 class OpenAISkillError(RuntimeError):
     pass
 
@@ -118,7 +114,7 @@ def _version_label_from_response(data: Any) -> str:
 
 def _extract_output_text(payload: dict[str, Any]) -> str:
     if isinstance(payload.get("output_text"), str) and payload["output_text"].strip():
-        return payload["output_text"].strip()
+        return str(payload["output_text"]).strip()
     chunks: list[str] = []
     for item in payload.get("output") or []:
         if not isinstance(item, dict):
@@ -133,13 +129,65 @@ def _extract_output_text(payload: dict[str, Any]) -> str:
     return "\n".join(chunks).strip()
 
 
+def _structured_output_schema(schema: type[BaseModel]) -> dict[str, Any]:
+    """Convert Pydantic JSON Schema to OpenAI's strict supported subset."""
+
+    unsupported = {
+        "default",
+        "format",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern",
+    }
+
+    def normalize(node: Any) -> Any:
+        if isinstance(node, list):
+            return [normalize(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+
+        cleaned = {
+            key: normalize(value)
+            for key, value in node.items()
+            if key not in unsupported
+        }
+        if cleaned.get("type") == "object" or "properties" in cleaned:
+            properties = cleaned.get("properties", {})
+            cleaned["additionalProperties"] = False
+            cleaned["required"] = list(properties)
+        return cleaned
+
+    result = normalize(schema.model_json_schema())
+    assert isinstance(result, dict)
+    return result
+
+
+def _response_error(payload: dict[str, Any], skill_id: str) -> str | None:
+    error = payload.get("error")
+    if error:
+        return f"{skill_id} response failed: {error}"
+    status = str(payload.get("status") or "").lower()
+    if status in {"failed", "cancelled", "incomplete"}:
+        detail = payload.get("incomplete_details") or status
+        return f"{skill_id} response {status}: {detail}"
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for block in item.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "refusal":
+                return f"{skill_id} response refused: {block.get('refusal', 'unknown reason')}"
+    return None
+
+
 class OpenAISkillsClient:
     def __init__(
         self,
         api_key: str,
         *,
         base_url: str | None = None,
-        model: str = "gpt-4.1",
+        model: str = "gpt-6-astra",
         timeout_s: float = 600.0,
     ) -> None:
         self._api_key = api_key
@@ -188,6 +236,8 @@ class OpenAISkillsClient:
         payload: dict[str, Any],
         instruction: str,
         schema: type[BaseModel],
+        *,
+        max_output_tokens: int = 8000,
     ) -> BaseModel:
         user_input = (
             f"{instruction}\n\n<payload>\n{json.dumps(payload)}\n</payload>"
@@ -204,6 +254,16 @@ class OpenAISkillsClient:
                     },
                 }
             ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": schema.__name__,
+                    "strict": True,
+                    "schema": _structured_output_schema(schema),
+                }
+            },
+            "max_output_tokens": max_output_tokens,
+            "store": False,
         }
         response = request_json(
             "POST",
@@ -214,12 +274,14 @@ class OpenAISkillsClient:
         )
         if not isinstance(response, dict):
             raise OpenAISkillError(f"unexpected responses payload: {response!r}")
+        response_error = _response_error(response, skill.skill_id)
+        if response_error:
+            raise OpenAISkillError(response_error)
         text = _extract_output_text(response)
         if not text:
             raise OpenAISkillError(f"{skill.skill_id} returned no text output")
-        cleaned = FENCE_RE.sub("", text).strip()
         try:
-            raw = json.loads(cleaned)
+            raw = json.loads(text)
         except json.JSONDecodeError as exc:
             raise OpenAISkillError(f"{skill.skill_id} returned non-JSON output") from exc
         try:

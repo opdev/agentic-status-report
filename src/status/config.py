@@ -42,9 +42,9 @@ class Settings(BaseSettings):
         description="Optional OpenAI-compatible model id (e.g. Granite); not used for hosted skills",
     )
     openai_skills_model: str = Field(
-        default="gpt-5.2",
+        default="gpt-6-astra",
         alias="OPENAI_SKILLS_MODEL",
-        description="OpenAI Responses model that supports shell + skill_reference (e.g. gpt-5.2)",
+        description="OpenAI Responses model that supports shell + skill_reference",
     )
 
     slack_bot_token: str | None = Field(default=None, alias="SLACK_BOT_TOKEN")

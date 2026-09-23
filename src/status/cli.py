@@ -217,7 +217,10 @@ def report_cmd(
 
 def _resolve_skill_provider(provider: str | None) -> str:
     settings = get_settings()
-    return (provider or settings.skill_provider or "anthropic").strip().lower()
+    resolved = (provider or settings.skill_provider or "anthropic").strip().lower()
+    if resolved not in {"anthropic", "openai"}:
+        raise typer.BadParameter("provider must be 'anthropic' or 'openai'")
+    return resolved
 
 
 @skills_app.command("list")

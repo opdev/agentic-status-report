@@ -25,7 +25,9 @@ def skill_provider(settings: Settings | None = None) -> SkillProvider:
     raw = (settings.skill_provider or "anthropic").strip().lower()
     if raw == "openai":
         return "openai"
-    return "anthropic"
+    if raw == "anthropic":
+        return "anthropic"
+    raise ValueError(f"Unsupported SKILL_PROVIDER={raw!r}; use 'anthropic' or 'openai'")
 
 
 def invoke_skill_json(
@@ -44,22 +46,28 @@ def invoke_skill_json(
     if provider == "openai":
         if not settings.openai_api_key:
             raise OpenAISkillError("OPENAI_API_KEY not configured")
-        client = OpenAISkillsClient(
+        openai_client = OpenAISkillsClient(
             settings.openai_api_key,
             base_url=settings.effective_openai_skills_base_url,
             model=settings.openai_skills_model,
         )
-        skill = OpenAISkillRef(skill_id=skill_id, version=skill_version)
-        return client.invoke_json(skill, payload, instruction, schema)
+        openai_skill = OpenAISkillRef(skill_id=skill_id, version=skill_version)
+        return openai_client.invoke_json(
+            openai_skill,
+            payload,
+            instruction,
+            schema,
+            max_output_tokens=max_tokens,
+        )
 
     if not settings.anthropic_api_key:
         raise SkillError("ANTHROPIC_API_KEY not configured")
-    client = SkillClient(
+    anthropic_client = SkillClient(
         api_key=settings.anthropic_api_key,
         model=settings.claude_model,
         max_tokens=max_tokens,
     )
-    skill = SkillRef(skill_id=skill_id, version=skill_version)
-    result = client.invoke_json(skill, payload, instruction, schema)
+    anthropic_skill = SkillRef(skill_id=skill_id, version=skill_version)
+    result = anthropic_client.invoke_json(anthropic_skill, payload, instruction, schema)
     assert isinstance(result, BaseModel)
     return result

@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from status.skills.drafter import (
+    _empty_draft,
+    _normalize_draft,
     load_fixture,
     run_drafter,
     week_ending_from_payload,
-    _empty_draft,
-    _normalize_draft,
 )
 from status.skills.schemas import DraftEntry, DraftOutput
 
@@ -51,6 +49,7 @@ def test_run_drafter_retries_once_on_skill_error() -> None:
         settings = settings_mock.return_value
         settings.drafter_skill_id = "skill_test"
         settings.drafter_skill_version = "latest"
+        settings.skill_provider = "anthropic"
         settings.anthropic_api_key = "key"
         settings.claude_model = "claude-sonnet-5"
 
@@ -73,6 +72,7 @@ def test_run_drafter_returns_flagged_empty_after_two_failures() -> None:
         settings = settings_mock.return_value
         settings.drafter_skill_id = "skill_test"
         settings.drafter_skill_version = "latest"
+        settings.skill_provider = "anthropic"
         settings.anthropic_api_key = "key"
         settings.claude_model = "claude-sonnet-5"
 
