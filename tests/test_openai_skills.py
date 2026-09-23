@@ -14,6 +14,7 @@ from status.skills.openai_skills import (
     _structured_output_schema,
     skill_dir_to_zip_bytes,
 )
+from status.skills.schemas import DraftOutput
 
 
 class ExampleOutput(BaseModel):
@@ -57,6 +58,14 @@ def test_structured_output_schema_is_strict_and_requires_nullable_fields() -> No
     assert schema["required"] == ["name", "note", "tags"]
     assert "default" not in schema["properties"]["note"]
     assert "default" not in schema["properties"]["tags"]
+
+
+def test_draft_schema_omits_arbitrary_evidence_label_map() -> None:
+    schema = _structured_output_schema(DraftOutput)
+    entry = schema["$defs"]["DraftEntry"]
+
+    assert "evidence_labels" not in entry["properties"]
+    assert "evidence_labels" not in entry["required"]
 
 
 def test_invoke_json_mounts_pinned_skill_and_requests_structured_output() -> None:

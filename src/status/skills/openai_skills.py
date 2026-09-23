@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ValidationError
 
-from status.collectors.http import request_json
+from status.collectors.http import HttpError, request_json
 
 log = logging.getLogger(__name__)
 class OpenAISkillError(RuntimeError):
@@ -148,13 +148,24 @@ def _structured_output_schema(schema: type[BaseModel]) -> dict[str, Any]:
         if not isinstance(node, dict):
             return node
 
-        cleaned = {
-            key: normalize(value)
-            for key, value in node.items()
-            if key not in unsupported
-        }
+        cleaned = {key: normalize(value) for key, value in node.items() if key not in unsupported}
         if cleaned.get("type") == "object" or "properties" in cleaned:
             properties = cleaned.get("properties", {})
+            if isinstance(properties, dict):
+                # Strict Structured Outputs cannot represent arbitrary-key maps.
+                # Drop defaulted metadata maps such as DraftEntry.evidence_labels;
+                # application post-processing reconstructs them from evidence.
+                properties = {
+                    key: value
+                    for key, value in properties.items()
+                    if not (
+                        isinstance(value, dict)
+                        and value.get("type") == "object"
+                        and not value.get("properties")
+                        and isinstance(node.get("properties", {}).get(key, {}).get("additionalProperties"), dict)
+                    )
+                }
+                cleaned["properties"] = properties
             cleaned["additionalProperties"] = False
             cleaned["required"] = list(properties)
         return cleaned
@@ -265,13 +276,16 @@ class OpenAISkillsClient:
             "max_output_tokens": max_output_tokens,
             "store": False,
         }
-        response = request_json(
-            "POST",
-            f"{self._base}/responses",
-            headers={**_auth_headers(self._api_key), "Content-Type": "application/json"},
-            body=body,
-            timeout_s=self._timeout_s,
-        )
+        try:
+            response = request_json(
+                "POST",
+                f"{self._base}/responses",
+                headers={**_auth_headers(self._api_key), "Content-Type": "application/json"},
+                body=body,
+                timeout_s=self._timeout_s,
+            )
+        except HttpError as exc:
+            raise OpenAISkillError(f"OpenAI Responses API request failed: {exc}") from exc
         if not isinstance(response, dict):
             raise OpenAISkillError(f"unexpected responses payload: {response!r}")
         response_error = _response_error(response, skill.skill_id)
