@@ -28,6 +28,7 @@ You receive a JSON payload:
     {
       "key": "AIPLAT-231",
       "summary": "string",
+      "description": "plain-text Jira description, possibly empty",
       "issue_type": "Story | Bug | Task | Spike",
       "status": "string",
       "assignee_account_id": "string | null",
@@ -119,6 +120,14 @@ Rules:
 - Describe what the work did; do not use merge counts or a list of PR numbers as
   the outcome. PR URLs remain evidence even when the sentence summarizes their
   combined purpose.
+- When ticket summaries are generic or duplicated, use `description` and this
+  week's `comments` to identify the concrete subject, decision, completed work,
+  and remaining work. Link text must name that subject; never write placeholders
+  such as "one discussion item", "another item", or "related work".
+- If two tickets have the same generic summary and their descriptions/comments
+  do not distinguish them, do not invent a distinction from status alone. Set
+  `needs_human: true` and ask what specifically completed and what remains in
+  progress. A vague status-only sentence is not a usable management update.
 
 - Do **not** use bare milestone numbers (`M4`, `M5`, `m3.5`) as shorthand —
   use the ticket summary as link text (drop the `M5:` prefix when it is only a

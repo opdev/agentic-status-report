@@ -139,6 +139,10 @@ Special routing:
 - Avoid vague standalone phrases such as "worked on", "tracked", or "advanced
   discussions". When the source contains the detail, name the specific problem,
   decision, component, result, or remaining state.
+- Never replace missing detail with ordinal placeholders such as "one discussion
+  item", "another item", "the first ticket", or "related work". If confirmed
+  outcomes do not say what completed or remains in progress, preserve no claim
+  beyond the supported subject; do not manufacture a comparison from statuses.
 
 ## Evidence and hyperlinks
 

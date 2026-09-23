@@ -8,9 +8,9 @@ from status.collectors.github import (
     commit_summary,
     extract_issue_keys,
 )
-from status.config import Settings
-from status.collectors.payload import build_payload
 from status.collectors.jira import build_jql, filter_person_jira_issues, normalize_jira_issue
+from status.collectors.payload import build_payload
+from status.config import Settings
 
 
 def test_build_jql_email_uses_assignee_and_reporter() -> None:
@@ -31,6 +31,15 @@ def test_normalize_jira_issue_transitions_and_comments() -> None:
         "key": "EET-5000",
         "fields": {
             "summary": "Fix parsing",
+            "description": {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{"type": "text", "text": "Handle nested values."}],
+                    }
+                ],
+            },
             "issuetype": {"name": "Bug"},
             "status": {"name": "Done"},
             "project": {"key": "EET"},
@@ -70,6 +79,7 @@ def test_normalize_jira_issue_transitions_and_comments() -> None:
         jira_email="alice@example.com",
     )
     assert normalized["key"] == "EET-5000"
+    assert normalized["description"] == "Handle nested values."
     assert normalized["epic_key"] == "EET-4900"
     assert normalized["is_assignee"] is False
     assert len(normalized["transitions"]) == 1

@@ -26,6 +26,7 @@ from status.skills.synthesizer import (
     build_synthesis_input,
     default_report_filename,
     limit_visible_github_links,
+    management_quality_issues,
     normalize_evidence,
     restore_markdown_structure,
     sanitize_report_markdown,
@@ -254,6 +255,19 @@ def test_limit_visible_github_links_keeps_only_two_per_bullet() -> None:
 
     assert cleaned.count("https://github.com") == 2
     assert "and pull secrets." in cleaned
+
+
+def test_management_quality_issues_rejects_ordinal_placeholders() -> None:
+    markdown = (
+        "## Partner Enablement\n\n"
+        "* **DH2i** - Advanced deployment UX engagement, with one discussion item "
+        "completed and another item in progress."
+    )
+
+    assert management_quality_issues(markdown) == [
+        "another item",
+        "one discussion item",
+    ]
 
 
 def test_sanitize_report_markdown_strips_gap_commentary() -> None:

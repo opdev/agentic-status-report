@@ -66,6 +66,11 @@ GAP_COMMENTARY_RES = [
         re.IGNORECASE,
     ),
 ]
+VAGUE_MANAGEMENT_PATTERNS = [
+    re.compile(r"\bone discussion item\b", re.IGNORECASE),
+    re.compile(r"\banother (?:discussion )?item\b", re.IGNORECASE),
+    re.compile(r"\bthe (?:first|second) (?:discussion )?item\b", re.IGNORECASE),
+]
 
 
 def normalize_evidence(evidence: list[str]) -> list[str]:
@@ -145,6 +150,19 @@ def limit_visible_github_links(text: str, *, maximum: int = 2) -> str:
 
         lines.append(MARKDOWN_LINK_RE.sub(replace, line))
     return "\n".join(lines)
+
+
+def management_quality_issues(markdown: str) -> list[str]:
+    """Return management-facing placeholder phrases that require richer source data."""
+    issues: list[str] = []
+    for line in markdown.splitlines():
+        if not line.lstrip().startswith("*"):
+            continue
+        for pattern in VAGUE_MANAGEMENT_PATTERNS:
+            match = pattern.search(line)
+            if match:
+                issues.append(match.group(0))
+    return sorted(set(issues), key=str.lower)
 
 
 def _collapse_punctuation(text: str) -> str:
@@ -437,9 +455,16 @@ def run_synthesizer_from_payload(
         max_tokens=SYNTHESIZER_MAX_TOKENS,
     )
     assert isinstance(result, SynthesisOutput)
-    return result.model_copy(
-        update={"markdown": sanitize_report_markdown(result.markdown, payload)}
-    )
+    markdown = sanitize_report_markdown(result.markdown, payload)
+    quality_issues = management_quality_issues(markdown)
+    if quality_issues:
+        phrases = ", ".join(repr(issue) for issue in quality_issues)
+        raise RuntimeError(
+            "management report contains vague placeholder language "
+            f"({phrases}); recollect richer Jira descriptions/comments or edit and "
+            "reconfirm the affected draft before delivery"
+        )
+    return result.model_copy(update={"markdown": markdown})
 
 
 def run_synthesizer(
