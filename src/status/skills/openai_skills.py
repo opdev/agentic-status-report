@@ -132,15 +132,10 @@ def _extract_output_text(payload: dict[str, Any]) -> str:
 def _structured_output_schema(schema: type[BaseModel]) -> dict[str, Any]:
     """Convert Pydantic JSON Schema to OpenAI's strict supported subset."""
 
-    unsupported = {
-        "default",
-        "format",
-        "maxItems",
-        "maxLength",
-        "minItems",
-        "minLength",
-        "pattern",
-    }
+    # Defaults are not part of OpenAI's strict response schema contract. Keep
+    # validation constraints such as minItems so the API cannot return output
+    # that Pydantic will immediately reject (for example empty evidence lists).
+    unsupported = {"default"}
 
     def normalize(node: Any) -> Any:
         if isinstance(node, list):
@@ -301,4 +296,10 @@ class OpenAISkillsClient:
         try:
             return schema.model_validate(raw)
         except ValidationError as exc:
-            raise OpenAISkillError(f"{skill.skill_id} output failed validation") from exc
+            details = "; ".join(
+                f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+                for error in exc.errors(include_url=False)
+            )
+            raise OpenAISkillError(
+                f"{skill.skill_id} output failed validation: {details}"
+            ) from exc

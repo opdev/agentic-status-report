@@ -66,6 +66,7 @@ def test_draft_schema_omits_arbitrary_evidence_label_map() -> None:
 
     assert "evidence_labels" not in entry["properties"]
     assert "evidence_labels" not in entry["required"]
+    assert entry["properties"]["evidence"]["minItems"] == 1
 
 
 def test_invoke_json_mounts_pinned_skill_and_requests_structured_output() -> None:
