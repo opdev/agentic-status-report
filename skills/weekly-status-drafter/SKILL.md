@@ -78,6 +78,15 @@ Tickets with no epic go into a single entry per project, with
 `epic_key: null` and `needs_human: true` — the human usually knows which
 initiative it belonged to and can say so in one word.
 
+Pull requests without a linked Jira ticket are still reportable work. Group
+them into one entry per repository, set `epic_key` and `epic_name` to `null`,
+and set `needs_human: true`. Use the repository as `project`, cite every PR URL
+that supports the entry, and ask which initiative the work belongs to. A merged
+PR is shipped evidence; an open or draft PR is progressing evidence. When a
+repository has both, use `progressing` and describe the merged and ongoing work
+separately. Do not return an empty `entries` array when this week's payload has
+attributable PR activity.
+
 ## Ownership
 
 Only report tickets **this person worked on this week**. Use `is_assignee`,
@@ -90,6 +99,9 @@ under the same epic.
   not mention M4/M5 milestone labels for tickets assigned to a teammate).
 - Epic-level entries should describe **this person's** shipped or in-progress
   work, not the whole epic's backlog.
+- `previous_entries` provide continuity and gap-detection context only. Never
+  copy their Jira keys, PR URLs, outcomes, or claims into current-week evidence
+  unless the same evidence also appears in this week's collector data.
 
 ## Outcome phrasing and links
 
@@ -179,6 +191,9 @@ This is the part a form can never do. After building entries, scan across
 - a ticket in progress substantially longer than similar tickets historically
 - an epic accumulating new tickets faster than it closes them
 - work in this week's PRs with no corresponding Jira ticket
+
+An unticketed-PR flag supplements its repository entry; it does not replace the
+entry.
 
 Flags are observations for the human, not accusations. Write them plainly:
 `AIPLAT-190 has had no activity for 3 weeks.` Not: `AIPLAT-190 appears to be at risk.`

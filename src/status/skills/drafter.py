@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from status.config import get_settings
 from status.db import get_session
 from status.db.draft import persist_draft_output
-from status.skills.client import SkillClient, SkillError, SkillRef
+from status.skills.client import SkillError
 from status.skills.evidence import (
     MILESTONE_ONLY_RE,
     build_evidence_labels,
@@ -26,7 +26,9 @@ from status.skills.evidence import (
     outcome_from_linked_evidence,
     payload_jira_keys,
 )
+from status.skills.openai_skills import OpenAISkillError
 from status.skills.schemas import DraftEntry, DraftOutput
+from status.skills.skill_invoke import invoke_skill_json, skill_prompt_version, skill_provider
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +61,10 @@ def load_fixture(path: Path) -> dict[str, Any]:
             "--save-fixture fixtures/payload.json\n"
             "Or omit --fixture and pass --person and --week to collect live."
         )
-    return json.loads(resolved.read_text(encoding="utf-8"))
+    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError(f"Fixture must contain a JSON object: {resolved}")
+    return payload
 
 
 def week_ending_from_payload(payload: dict[str, Any]) -> date:
@@ -115,6 +120,63 @@ def attach_evidence_labels(draft: DraftOutput, payload: dict[str, Any]) -> Draft
     return draft.model_copy(update={"entries": enriched})
 
 
+def _pr_outcome(pull_requests: list[dict[str, Any]]) -> str:
+    """Build a concise, fully grounded outcome for repository-only PR work."""
+    merged = [pr for pr in pull_requests if pr.get("state") == "merged"]
+    ongoing = [pr for pr in pull_requests if pr.get("state") != "merged"]
+
+    def links(rows: list[dict[str, Any]]) -> str:
+        values = [f"[{str(row.get('title') or 'pull request').strip()}]({row['url']})" for row in rows]
+        if len(values) == 1:
+            return values[0]
+        return f"{', '.join(values[:-1])}, and {values[-1]}"
+
+    clauses: list[str] = []
+    if merged:
+        clauses.append(f"Merged {links(merged)}")
+    if ongoing:
+        clauses.append(f"Working on {links(ongoing)}")
+    return ". ".join(clauses) + "."
+
+
+def ensure_pr_only_entries(draft: DraftOutput, payload: dict[str, Any]) -> DraftOutput:
+    """Add grounded repository entries for collected PRs the model omitted."""
+    cited = {item for entry in draft.entries for item in entry.evidence}
+    by_repo: dict[str, list[dict[str, Any]]] = {}
+    for pr in payload.get("pull_requests") or []:
+        url = str(pr.get("url") or "").strip()
+        repo = str(pr.get("repo") or "").strip()
+        if not url or not repo or url in cited:
+            continue
+        by_repo.setdefault(repo, []).append(pr)
+
+    if not by_repo:
+        return draft
+
+    entries = list(draft.entries)
+    flags = list(draft.flags)
+    for repo, pull_requests in by_repo.items():
+        entries.append(
+            DraftEntry(
+                project=repo,
+                epic_key=None,
+                epic_name=None,
+                state=(
+                    "shipped"
+                    if all(pr.get("state") == "merged" for pr in pull_requests)
+                    else "progressing"
+                ),
+                outcome=_pr_outcome(pull_requests),
+                evidence=[str(pr["url"]) for pr in pull_requests],
+                confidence="high",
+                needs_human=True,
+                why_flagged="Which initiative should this unticketed pull-request work roll up to?",
+            )
+        )
+        flags.append(f"{repo} has pull-request activity with no current-week Jira evidence.")
+    return draft.model_copy(update={"entries": entries, "flags": flags})
+
+
 def postprocess_draft(draft: DraftOutput, payload: dict[str, Any]) -> DraftOutput:
     """Filter evidence to this person's payload and enrich outcomes with Jira links."""
     settings = get_settings()
@@ -155,12 +217,14 @@ def postprocess_draft(draft: DraftOutput, payload: dict[str, Any]) -> DraftOutpu
             updates["needs_human"] = True
             if not entry.why_flagged:
                 updates["why_flagged"] = (
-                    "Some cited tickets were removed because they are not assigned to you "
-                    "or were not in this week's collector data — OK to keep?"
+                    "Some citations were removed because they are absent from this week's "
+                    "collector data; previous entries are context only. Is any removed work "
+                    "actually current?"
                 )
         processed.append(entry.model_copy(update=updates))
 
-    return draft.model_copy(update={"entries": processed})
+    processed_draft = draft.model_copy(update={"entries": processed})
+    return ensure_pr_only_entries(processed_draft, payload)
 
 
 def run_drafter(payload: dict[str, Any], *, dry_run: bool = False) -> DraftOutput:
@@ -171,14 +235,11 @@ def run_drafter(payload: dict[str, Any], *, dry_run: bool = False) -> DraftOutpu
             flags=["dry-run: no skill invocation"] if dry_run else ["no DRAFTER_SKILL_ID configured"],
         )
 
-    if not settings.anthropic_api_key:
+    if skill_provider(settings) == "openai":
+        if not settings.openai_api_key:
+            return _empty_draft(payload, flags=["OPENAI_API_KEY not configured"])
+    elif not settings.anthropic_api_key:
         return _empty_draft(payload, flags=["ANTHROPIC_API_KEY not configured"])
-
-    client = SkillClient(api_key=settings.anthropic_api_key, model=settings.claude_model)
-    skill = SkillRef(
-        skill_id=settings.drafter_skill_id,
-        version=settings.drafter_skill_version,
-    )
 
     instruction = DRAFTER_INSTRUCTION
     regeneration_notes = str(payload.get("regeneration_notes") or "").strip()
@@ -188,15 +249,22 @@ def run_drafter(payload: dict[str, Any], *, dry_run: bool = False) -> DraftOutpu
             f"{regeneration_notes}"
         )
 
-    last_error: SkillError | None = None
+    last_error: SkillError | OpenAISkillError | None = None
     for attempt in range(2):
         try:
-            result = client.invoke_json(skill, payload, instruction, DraftOutput)
+            result = invoke_skill_json(
+                skill_id=settings.drafter_skill_id,
+                skill_version=settings.drafter_skill_version,
+                payload=payload,
+                instruction=instruction,
+                schema=DraftOutput,
+                settings=settings,
+            )
             assert isinstance(result, DraftOutput)
             normalized = _normalize_draft(result, payload)
             labeled = attach_evidence_labels(normalized, payload)
             return postprocess_draft(labeled, payload)
-        except SkillError as exc:
+        except (SkillError, OpenAISkillError) as exc:
             last_error = exc
             log.warning("drafter attempt %s failed: %s", attempt + 1, exc)
 
@@ -262,10 +330,11 @@ def draft_and_persist(
     draft = run_drafter(payload, dry_run=dry_run)
 
     if settings.drafter_skill_id and not dry_run:
-        prompt_version = SkillRef(
-            skill_id=settings.drafter_skill_id,
-            version=settings.drafter_skill_version,
-        ).prompt_version
+        prompt_version = skill_prompt_version(
+            settings.drafter_skill_id,
+            settings.drafter_skill_version,
+            settings,
+        )
     else:
         prompt_version = "dry-run"
 

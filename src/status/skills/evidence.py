@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 JIRA_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 JIRA_BROWSE_RE = re.compile(
@@ -35,7 +36,7 @@ def jira_keys_from_evidence(evidence: list[str]) -> list[str]:
     return keys
 
 
-def issue_summary_index(jira_issues: list[dict]) -> dict[str, str]:
+def issue_summary_index(jira_issues: list[dict[str, Any]]) -> dict[str, str]:
     """Build key -> summary from normalized collector issues."""
     summaries: dict[str, str] = {}
     for issue in jira_issues:
@@ -95,7 +96,7 @@ def merge_evidence_labels(
     return labels
 
 
-def payload_jira_keys(payload: dict) -> set[str]:
+def payload_jira_keys(payload: dict[str, Any]) -> set[str]:
     return {
         str(issue["key"])
         for issue in payload.get("jira_issues") or []
@@ -107,8 +108,8 @@ def filter_evidence_to_payload(
     evidence: list[str],
     *,
     allowed_jira_keys: set[str],
-    pull_requests: list[dict] | None = None,
-    commits: list[dict] | None = None,
+    pull_requests: list[dict[str, Any]] | None = None,
+    commits: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Keep only evidence items grounded in this week's collector payload."""
     pr_urls = {str(pr.get("url")) for pr in (pull_requests or []) if pr.get("url")}
@@ -126,8 +127,6 @@ def filter_evidence_to_payload(
         if browse_match and browse_match.group(1) in allowed_jira_keys:
             kept.append(item)
             continue
-        if item.startswith("http"):
-            kept.append(item)
     return kept
 
 

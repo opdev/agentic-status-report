@@ -78,7 +78,10 @@ oc apply -f deploy/secrets.yaml
 | `SLACK_BOT_TOKEN` | `xoxb-…` |
 | `SLACK_APP_TOKEN` | `xapp-…` (Socket Mode) |
 
-The smoke-test Job also needs Jira, GitHub, Anthropic, and `DRAFTER_SKILL_ID`.
+The smoke-test Job also needs Jira, GitHub, one hosted-skill provider credential,
+and `DRAFTER_SKILL_ID`. For OpenAI set `SKILL_PROVIDER=openai`,
+`OPENAI_API_KEY`, and `OPENAI_SKILLS_MODEL`; for Anthropic use the existing
+`ANTHROPIC_API_KEY` configuration. Production should pin numeric skill versions.
 
 ## Deploy the Slack bot
 

@@ -1,8 +1,9 @@
 # Agentic Weekly Status Pipeline
 
 Automated weekly status reporting: collect activity from Jira and GitHub, draft
-per-person entries with Claude Skills, review in Slack, store in a Postgres
-ledger, and synthesize a management report.
+per-person entries with hosted Agent Skills, review in Slack, store in a Postgres
+ledger, and synthesize a management report. Anthropic and OpenAI hosted Skills
+are supported through the same pipeline.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the full design.
 
@@ -32,8 +33,8 @@ status draft   --person pilot --week 2026-08-14
 status send    --person pilot --week 2026-08-14
 status slack run
 status report  --week 2026-08-14 --dry-run
-status skills list
-status skills publish --skill drafter
+status skills list --provider openai
+status skills publish --provider openai --skill all
 ```
 
 Install Slack support: `pip install -e ".[slack]"`
@@ -46,7 +47,7 @@ Deploy the Slack Socket Mode bot to OpenShift — no ingress required. See
 ## Project layout
 
 ```
-skills/           Claude Agent Skill definitions
+skills/           Portable Agent Skill definitions
 src/status/       Python pipeline
 docs/             Design and development guides
 alembic/          Database migrations

@@ -15,7 +15,7 @@ production deploy, see [deploy/README.md](../deploy/README.md).
 | `psql` | any | Seeding person rows, ad-hoc queries |
 | `oc` + cluster access | optional | OpenShift Postgres (PGO) and port-forward |
 | Slack app | optional | `status send` and `status slack run` |
-| Anthropic API key | optional | `status draft` (hosted drafter skill) |
+| Anthropic or OpenAI API key | optional | `status draft` / `status report` (hosted skills) |
 | Jira / GitHub tokens | optional | `status collect` live data |
 
 `--week` must be a **Friday** (`YYYY-MM-DD`), matching `week_ending` in the ledger.
@@ -80,7 +80,36 @@ GITHUB_LOGIN=your-github-login
 Jira collection uses `JIRA_EMAIL` for assignee/reporter JQL. Override per run with
 `status collect --jira-email` when needed.
 
-### Draft (Claude hosted skill)
+### Hosted skills
+
+Choose one provider. Anthropic remains the default for backward compatibility.
+
+**OpenAI hosted Skills:**
+
+```bash
+SKILL_PROVIDER=openai
+OPENAI_API_KEY=
+OPENAI_SKILLS_BASE_URL=https://api.openai.com/v1
+OPENAI_SKILLS_MODEL=gpt-6-astra
+DRAFTER_SKILL_ID=
+DRAFTER_SKILL_VERSION=latest
+SYNTHESIZER_SKILL_ID=
+SYNTHESIZER_SKILL_VERSION=latest
+```
+
+Upload both local skill directories, then copy the printed IDs into `.env`:
+
+```bash
+status skills publish --provider openai --skill all
+status skills list --provider openai
+```
+
+Pin numeric versions in production rather than using `latest`. OpenAI hosted
+Skills are mounted in an OpenAI-managed shell container through the Responses
+API; the OpenShift workloads only require outbound HTTPS to the configured API
+endpoint.
+
+**Anthropic hosted Skills:**
 
 ```bash
 ANTHROPIC_API_KEY=
@@ -92,7 +121,7 @@ DRAFTER_SKILL_VERSION=latest
 Publish or refresh the skill after editing `skills/weekly-status-drafter/`:
 
 ```bash
-status skills publish --skill drafter
+status skills publish --provider anthropic --skill drafter
 # copy printed skill id into .env if first time
 ```
 
