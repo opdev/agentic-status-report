@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM cgr.dev/chainguard/python:latest-dev AS build
+FROM registry.access.redhat.com/hi/python:3.11-builder AS build
 
 ENV LANG=C.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -10,7 +10,7 @@ ENV LANG=C.UTF-8 \
 
 WORKDIR /app
 
-RUN python -m venv "${VIRTUAL_ENV}"
+RUN python3 -m venv "${VIRTUAL_ENV}"
 
 COPY pyproject.toml README.md ./
 COPY src/ src/
@@ -19,13 +19,17 @@ RUN pip install --no-cache-dir ".[slack]" \
     && pip uninstall --yes pip setuptools wheel
 
 
-FROM cgr.dev/chainguard/python:latest AS run
+FROM registry.access.redhat.com/hi/python:3.11 AS run
 
 ENV LANG=C.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     VIRTUAL_ENV=/app/venv \
     PATH="/app/venv/bin:${PATH}"
+
+USER 0
+
+RUN ["/usr/local/bin/pip", "uninstall", "--yes", "pip", "setuptools", "wheel"]
 
 WORKDIR /app
 
@@ -34,7 +38,7 @@ COPY skills/ skills/
 COPY alembic/ alembic/
 COPY alembic.ini .
 
-USER nonroot
+USER 65532:65532
 
 ENTRYPOINT ["status"]
 CMD ["slack", "run"]
