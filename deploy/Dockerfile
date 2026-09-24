@@ -16,7 +16,8 @@ COPY skills/ skills/
 COPY alembic/ alembic/
 COPY alembic.ini .
 
-RUN pip install ".[slack]"
+RUN pip install ".[slack]" \
+    && pip uninstall --yes setuptools
 
 USER 1001
 
