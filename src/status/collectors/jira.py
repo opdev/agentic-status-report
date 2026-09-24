@@ -7,7 +7,7 @@ import logging
 import re
 import urllib.error
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from functools import lru_cache
 from typing import Any
 
@@ -32,7 +32,7 @@ def _probe_jira_auth(base_url: str, email: str, api_token: str) -> bool:
     )
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
-            return response.status == 200
+            return int(response.status) == 200
     except urllib.error.HTTPError:
         return False
 
@@ -87,7 +87,7 @@ def _in_window(dt: datetime | None, start: date, end: date) -> bool:
     if dt is None:
         return False
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return start <= dt.date() <= end
 
 
@@ -189,6 +189,14 @@ def _comment_body(body: Any) -> str:
     return str(body or "")
 
 
+def _bounded_jira_text(body: Any, *, maximum: int = 2_000) -> str:
+    """Flatten Jira text fields while keeping skill payloads bounded."""
+    text = _comment_body(body).strip()
+    if len(text) <= maximum:
+        return text
+    return text[: maximum - 1].rstrip() + "…"
+
+
 def _in_progress_since(fields: dict[str, Any], changelog: dict[str, Any] | None) -> str | None:
     status = fields.get("status", {}).get("name", "")
     if status.lower() != "in progress":
@@ -199,9 +207,13 @@ def _in_progress_since(fields: dict[str, Any], changelog: dict[str, Any] | None)
         for history in changelog.get("histories", []):
             created = _parse_jira_dt(history.get("created"))
             for item in history.get("items", []):
-                if item.get("field") == "status" and item.get("toString", "").lower() == "in progress":
-                    if created and (latest is None or created > latest):
-                        latest = created
+                if (
+                    item.get("field") == "status"
+                    and item.get("toString", "").lower() == "in progress"
+                    and created
+                    and (latest is None or created > latest)
+                ):
+                    latest = created
     return latest.isoformat() if latest else None
 
 
@@ -233,6 +245,7 @@ def normalize_jira_issue(
     return {
         "key": issue.get("key", ""),
         "summary": fields.get("summary", ""),
+        "description": _bounded_jira_text(fields.get("description")),
         "issue_type": fields.get("issuetype", {}).get("name", ""),
         "status": fields.get("status", {}).get("name", ""),
         "epic_key": epic_key,
@@ -295,7 +308,7 @@ def check_project_access(
 
     settings = settings or get_settings()
     headers = _auth_header(settings)
-    base = settings.jira_base_url.rstrip("/")
+    base = (settings.jira_base_url or "").rstrip("/")
     blocked: list[str] = []
 
     for project in projects:
@@ -340,7 +353,7 @@ def collect_jira_activity(
 ) -> list[dict[str, Any]]:
     settings = settings or get_settings()
     headers = _auth_header(settings)
-    base = settings.jira_base_url.rstrip("/")
+    base = (settings.jira_base_url or "").rstrip("/")
     jql = build_jql(
         jira_email,
         week_start,
@@ -358,6 +371,7 @@ def collect_jira_activity(
 
     fields = [
         "summary",
+        "description",
         "status",
         "issuetype",
         "project",
@@ -406,7 +420,7 @@ def collect_jira_activity(
                 headers=headers,
             )
             changelog = changelog_data if changelog_data else None
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - preserve issue collection without changelog
             log.warning("failed to fetch changelog for %s: %s", key, exc)
             changelog = None
 
@@ -434,9 +448,7 @@ def filter_person_jira_issues(
 
     kept: list[dict[str, Any]] = []
     for issue in issues:
-        if issue.get("is_assignee") or issue.get("is_reporter"):
-            kept.append(issue)
-        elif issue.get("transitions") or issue.get("comments"):
+        if issue.get("is_assignee") or issue.get("is_reporter") or issue.get("transitions") or issue.get("comments"):
             kept.append(issue)
         else:
             log.debug(
@@ -460,7 +472,7 @@ def fetch_jira_summaries(
 
     settings = settings or get_settings()
     headers = _auth_header(settings)
-    base = settings.jira_base_url.rstrip("/")
+    base = (settings.jira_base_url or "").rstrip("/")
     jql = "key in (" + ", ".join(unique) + ")"
     data = post_json(
         f"{base}/rest/api/3/search/jql",

@@ -401,3 +401,15 @@ Make provider choice from these measurements. “Cheaper” should mean total op
   evidence filter accepted unknown HTTP URLs. Recommended and implemented a
   repository-grouped PR-only fallback, explicit current-week evidence rules,
   strict URL grounding, clearer stale-evidence warnings, and regression tests.
+- **2026-09-23:** Compared the generated management report with the legacy report
+  style. Found excessive visible PR citations, repository-centric narratives,
+  and nondeterministic section placement. Implemented authoritative legacy
+  category/name metadata, management-facing outcome rules, descriptive link
+  labels, and a two-GitHub-link presentation limit while retaining the complete
+  evidence set for auditability.
+- **2026-09-23:** Found that duplicated generic Jira summaries can produce
+  management placeholders such as "one discussion item" and "another in
+  progress." The collector previously omitted Jira descriptions, leaving only
+  identical summaries and statuses. Added bounded description collection,
+  concrete-detail rules for both skills, and a delivery quality gate that
+  rejects ordinal placeholders rather than inventing unsupported distinctions.

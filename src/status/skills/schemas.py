@@ -52,6 +52,8 @@ class SynthesisEntry(BaseModel):
     ask: str | None = None
     evidence: list[str] = Field(default_factory=list)
     evidence_labels: dict[str, str] = Field(default_factory=dict)
+    report_category: Literal["Partner Enablement", "Certification / CI", "Mindshare"]
+    report_name: str
 
 
 class SynthesisInput(BaseModel):
