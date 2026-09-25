@@ -29,7 +29,7 @@ spec:
             - name: send-drafts
               image: quay.io/opdev/weekly-status:latest
               imagePullPolicy: Always
-              command: ["sh", "-c", "set -eu && status run-week send-drafts --week auto"]
+              command: ["status", "run-week", "send-drafts", "--week", "auto"]
               envFrom:
                 - secretRef:
                     name: weekly-status-secrets

@@ -29,7 +29,7 @@ spec:
             - name: collect-and-draft
               image: quay.io/opdev/weekly-status:latest
               imagePullPolicy: Always
-              command: ["sh", "-c", "set -eu && status run-week collect-and-draft --week auto"]
+              command: ["status", "run-week", "collect-and-draft", "--week", "auto"]
               envFrom:
                 - secretRef:
                     name: weekly-status-secrets
