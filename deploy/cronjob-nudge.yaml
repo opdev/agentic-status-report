@@ -29,7 +29,7 @@ spec:
             - name: nudge
               image: quay.io/opdev/weekly-status:latest
               imagePullPolicy: Always
-              command: ["sh", "-c", "set -eu && status run-week nudge --week auto --max-reminders 2"]
+              command: ["status", "run-week", "nudge", "--week", "auto", "--max-reminders", "2"]
               envFrom:
                 - secretRef:
                     name: weekly-status-secrets

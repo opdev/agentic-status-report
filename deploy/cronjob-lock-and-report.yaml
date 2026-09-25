@@ -29,7 +29,7 @@ spec:
             - name: lock-and-report
               image: quay.io/opdev/weekly-status:latest
               imagePullPolicy: Always
-              command: ["sh", "-c", "set -eu && status run-week lock-and-report --week auto --deliver"]
+              command: ["status", "run-week", "lock-and-report", "--week", "auto", "--deliver"]
               envFrom:
                 - secretRef:
                     name: weekly-status-secrets
