@@ -1,33 +1,25 @@
 # Agentic Weekly Status Pipeline Audit
 
-**Audit date:** 2026-09-22; updated 2026-09-25
-**Reviewed revision:** `49a1c33` (`upstream/main`) plus the unmerged
-`fix/m6-production-orchestration` repair branch
+**Audit date:** 2026-09-22
+**Reviewed revision:** `93593c7` (`test/upstream-main-workflow`, matching `upstream/main`)
 **Purpose:** Living record of audit findings, problems, feature requests, and enhancement ideas. Update this document as findings are resolved or new work is proposed.
 
 ## Executive assessment
 
 The workflow is sound: collect Jira and GitHub evidence, create a per-person draft, require human review in Slack, preserve confirmed revisions in a ledger, and synthesize a management report. Moving people from authoring to reviewing should reduce weekly friction while the human-confirmation gate limits unsupported AI claims.
 
-The project is a late-stage prototype rather than production-ready automation.
-The component features are largely present. The release-blocking M6 defects found
-in the initial audit are repaired on `fix/m6-production-orchestration`, where all
-129 unit tests pass, but the branch still needs review and merge before the
-scheduled workflow should be treated as production-ready. The prompt skills are
-well designed in principle but still contain contract mismatches and ambiguous
-rules that can lead to inconsistent or unverifiable output.
+The project is a late-stage prototype rather than production-ready automation. The component features are largely present, and all 97 unit tests pass, but the newly merged orchestration has defects that prevent the scheduled workflow from operating as documented. The prompt skills are well designed in principle but contain contract mismatches and ambiguous rules that can lead to inconsistent or unverifiable output.
 
 ## Current project status
 
 - M0-M5 capabilities are largely implemented: collection, drafting, Slack confirmation/edit/regeneration, ledger persistence, synthesis, and delivery.
-- M6 CronJob automation is merged into `upstream/main`; its five release-blocking
-  orchestration defects are repaired on `fix/m6-production-orchestration`.
-- Hosted OpenAI Skills support and management-report style improvements are merged.
-- Unit tests on the repair branch: **129 passed**.
-- CI runs pytest, builds the container, and blocks publishing on HIGH/CRITICAL
-  Trivy findings. Ruff, mypy, migration, and manifest validation are not yet CI gates.
+- M6 CronJob automation is merged into `upstream/main`.
+- Unit tests: **97 passed**.
+- Ruff: **78 findings**, including undefined names that represent runtime failures.
+- Strict mypy: **56 errors across 15 files**.
+- No repository CI workflow was found.
 - The working tree contains local/generated artifacts and a modified Postgres deployment document.
-- The older partial M6 repair `d01b85f` has been superseded by the current repair branch.
+- A critical M6 repair exists on unmerged branch `fix/m6-lock-and-report-synthesize` (`d01b85f`).
 
 ## Priority 0: release blockers
 
@@ -36,9 +28,6 @@ rules that can lead to inconsistent or unverifiable output.
 `src/status/cli.py` calls `run_synthesizer` from `batch_lock_and_report`, but the function is not imported. The job expires unconfirmed participation and then raises `NameError` before report generation.
 
 **Recommendation:** Merge or recreate `d01b85f`, route the job through `synthesize_report`, persist the report audit chain, and retain its added tests.
-
-**Status (2026-09-25):** Resolved on `fix/m6-production-orchestration`; the job now
-uses `synthesize_report` with persistence, delivery, output-file, and dry-run coverage.
 
 ### P0.2 All CronJobs use incorrect local hours
 
@@ -51,32 +40,19 @@ The manifests specify `timeZone: America/New_York`; therefore cron expressions a
 | nudge | Fri 14:00 ET | Fri 19:00 ET | `0 14 * * 5` |
 | lock-and-report | Mon 09:00 ET | Mon 14:00 ET | `0 9 * * 1` |
 
-**Status (2026-09-25):** Resolved on `fix/m6-production-orchestration`; regression
-tests assert every schedule, timezone, and active deadline.
-
 ### P0.3 Reminder automation uses an undefined logger
 
 `batch_nudge` references `log` on its skip, success, and exception paths, but `src/status/cli.py` never defines it. The reminder job can fail before or after sending a message.
 
-**Status (2026-09-25):** Resolved on `fix/m6-production-orchestration`; the CLI now
-defines its logger and isolates reminder failures.
-
 ### P0.4 Batch failures return success to Kubernetes
 
 The collect/send commands print person-level failures but do not return a nonzero exit code. Kubernetes will mark partially or wholly failed jobs successful, suppressing retries and failure alerts.
-
-**Status (2026-09-25):** Resolved on `fix/m6-production-orchestration`; any
-person-level failure produces exit code 1 after the remaining people are processed.
 
 ### P0.5 Per-person failure isolation is unsafe
 
 `run_batch_operation` reuses one SQLAlchemy session across all people and does not roll it back after an operation fails. A database exception can leave the session unusable, causing later people to fail. It also classifies collection and drafting failures as `send_failed`.
 
 **Recommendation:** Use one transaction/session per person, explicitly roll back failures, and record stage-specific states such as `collect_failed`, `draft_failed`, and `send_failed`.
-
-**Status (2026-09-25):** Resolved on `fix/m6-production-orchestration`; roster,
-person operations, and failure recording use separate session scopes, and the
-workflow records `collect_failed`, `draft_failed`, `send_failed`, and `nudge_failed`.
 
 ## Priority 1: production hardening
 
@@ -437,9 +413,3 @@ Make provider choice from these measurements. “Cheaper” should mean total op
   identical summaries and statuses. Added bounded description collection,
   concrete-detail rules for both skills, and a delivery quality gate that
   rejects ordinal placeholders rather than inventing unsupported distinctions.
-- **2026-09-25:** Implemented the five M6 release-blocker repairs on
-  `fix/m6-production-orchestration`: corrected timezone-aware CronJob schedules,
-  added active deadlines, routed Monday reporting through the persisted synthesis
-  workflow, isolated person-level database work, added stage-specific failure
-  states, returned nonzero status for partial failures, documented participation
-  failure semantics in the synthesizer skill, and added regression tests.
