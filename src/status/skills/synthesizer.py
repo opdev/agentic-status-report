@@ -368,14 +368,26 @@ def build_dry_run_markdown(
                 )
             lines.append("")
 
-    expired = sorted(
-        p.display_name for p in payload.participation if p.status == "expired"
+    participation_notices = {
+        "expired": "No update from {name} this week.",
+        "send_failed": "The draft status could not be delivered to {name}.",
+        "collect_failed": "Status evidence collection failed for {name}.",
+        "draft_failed": "Draft status generation failed for {name}.",
+        "nudge_failed": "The status reminder could not be delivered to {name}.",
+    }
+    notices = sorted(
+        (
+            p.display_name,
+            participation_notices[p.status].format(name=p.display_name),
+        )
+        for p in payload.participation
+        if p.status in participation_notices
     )
-    if expired:
+    if notices:
         lines.append("## Team participation")
         lines.append("")
-        for name in expired:
-            lines.append(f"* No update from {name} this week.")
+        for _name, notice in notices:
+            lines.append(f"* {notice}")
         lines.append("")
 
     asks = [entry.ask for entry in payload.entries if entry.ask]

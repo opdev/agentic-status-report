@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from typing import Any, Callable
+from datetime import date
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -26,10 +27,21 @@ class BatchResult:
     result: Any | None = None
 
 
+class BatchStageError(RuntimeError):
+    """An operation failure with a participation state suitable for persistence."""
+
+    def __init__(self, status: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 def run_batch_operation(
     week_ending: date,
     operation: Callable[[Session, Person, date], Any],
     operation_name: str,
+    *,
+    default_failure_status: str,
+    record_failures: bool = True,
 ) -> list[BatchResult]:
     """
     Run an operation for each eligible person with error isolation.
@@ -37,59 +49,87 @@ def run_batch_operation(
     """
     results: list[BatchResult] = []
 
-    with get_session() as session:
-        persons = get_eligible_persons(session)
+    with get_session() as roster_session:
+        person_ids = [person.person_id for person in get_eligible_persons(roster_session)]
 
-        if not persons:
-            log.warning(f"No eligible persons found for {operation_name}")
-            return results
+    if not person_ids:
+        log.warning("No eligible persons found for %s", operation_name)
+        return results
 
-        log.info(
-            f"Running {operation_name} for {len(persons)} persons: {[p.person_id for p in persons]}"
-        )
+    log.info("Running %s for %s persons: %s", operation_name, len(person_ids), person_ids)
 
-        for person in persons:
-            try:
+    for person_id in person_ids:
+        try:
+            # Let the context manager roll back an operation failure before the
+            # next person gets a fresh session and transaction.
+            with get_session() as session:
+                person = session.get(Person, person_id)
+                if person is None:
+                    raise BatchStageError(
+                        default_failure_status,
+                        f"person disappeared during {operation_name}: {person_id}",
+                    )
                 result = operation(session, person, week_ending)
-                results.append(
-                    BatchResult(
-                        person_id=person.person_id,
-                        success=True,
-                        result=result,
-                    )
+            results.append(
+                BatchResult(
+                    person_id=person_id,
+                    success=True,
+                    result=result,
                 )
-                log.info(f"{operation_name} succeeded for {person.person_id}")
-            except Exception as exc:
-                results.append(
-                    BatchResult(
-                        person_id=person.person_id,
-                        success=False,
-                        error=str(exc),
-                    )
+            )
+            log.info("%s succeeded for %s", operation_name, person_id)
+        except Exception as exc:  # noqa: BLE001 - isolate each person's operation
+            results.append(
+                BatchResult(
+                    person_id=person_id,
+                    success=False,
+                    error=str(exc),
                 )
-                log.error(f"{operation_name} failed for {person.person_id}: {exc}")
+            )
+            log.error("%s failed for %s: %s", operation_name, person_id, exc)
 
-                # Mark participation as send_failed
+            if record_failures:
+                failure_status = (
+                    exc.status if isinstance(exc, BatchStageError) else default_failure_status
+                )
                 try:
-                    _mark_send_failed(session, person.person_id, week_ending)
-                except Exception as inner_exc:
+                    with get_session() as failure_session:
+                        mark_participation_failure(
+                            failure_session,
+                            person_id,
+                            week_ending,
+                            status=failure_status,
+                            error=str(exc),
+                        )
+                except Exception as inner_exc:  # noqa: BLE001 - retain original failure
                     log.error(
-                        f"Failed to mark send_failed for {person.person_id}: {inner_exc}"
+                        "Failed to record %s for %s: %s",
+                        failure_status,
+                        person_id,
+                        inner_exc,
                     )
 
     return results
 
 
-def _mark_send_failed(session: Session, person_id: str, week_ending: date) -> None:
-    """Set participation.status = 'send_failed' for this person/week."""
+def mark_participation_failure(
+    session: Session,
+    person_id: str,
+    week_ending: date,
+    *,
+    status: str,
+    error: str,
+) -> None:
+    """Record the failed workflow stage without committing another person's work."""
     row = session.get(Participation, (person_id, week_ending))
     if row is None:
         row = Participation(
             person_id=person_id,
             week_ending=week_ending,
-            status="send_failed",
+            status=status,
         )
         session.add(row)
     else:
-        row.status = "send_failed"
-    session.commit()
+        row.status = status
+    row.note = error[:2_000]
+    session.flush()

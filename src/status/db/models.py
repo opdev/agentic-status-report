@@ -54,6 +54,9 @@ class ParticipationStatus(str, Enum):
     EXPIRED = "expired"
     ON_LEAVE = "on_leave"
     SEND_FAILED = "send_failed"
+    COLLECT_FAILED = "collect_failed"
+    DRAFT_FAILED = "draft_failed"
+    NUDGE_FAILED = "nudge_failed"
 
 
 class Person(Base):

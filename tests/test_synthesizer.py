@@ -139,6 +139,36 @@ def test_build_dry_run_markdown_includes_confirmed_entries() -> None:
     assert "_Input: 1 entries" in markdown
 
 
+def test_build_dry_run_markdown_distinguishes_user_and_system_failures() -> None:
+    week = date(2026, 8, 14)
+    payload = SynthesisInput(
+        week_ending=week.isoformat(),
+        participation=[
+            SynthesisParticipation(
+                person_id="expired",
+                display_name="Expired User",
+                status="expired",
+            ),
+            SynthesisParticipation(
+                person_id="collection",
+                display_name="Collection User",
+                status="collect_failed",
+            ),
+            SynthesisParticipation(
+                person_id="leave",
+                display_name="Leave User",
+                status="on_leave",
+            ),
+        ],
+    )
+
+    markdown = build_dry_run_markdown(payload, week, reason="Dry-run")
+
+    assert "No update from Expired User this week." in markdown
+    assert "Status evidence collection failed for Collection User." in markdown
+    assert "Leave User" not in markdown
+
+
 def test_sanitize_report_markdown_repairs_bare_paren_jira_urls() -> None:
     payload = SynthesisInput(
         week_ending="2026-08-14",

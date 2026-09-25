@@ -37,7 +37,7 @@ source data.
   "participation": [{
     "person_id": "string",
     "display_name": "string",
-    "status": "confirmed | expired | on_leave | sent | send_failed"
+    "status": "confirmed | expired | on_leave | sent | send_failed | collect_failed | draft_failed | nudge_failed"
   }]
 }
 ```
@@ -105,7 +105,17 @@ Special routing:
 - Organize by epic/project subsection, **not by person**. Managers track initiatives.
 - Multiple entries for the same epic from different people → combine into one bullet using semicolons.
 - Sort entries alphabetically within each main section.
-- Non-responders (`participation.status = expired`) → add a note at the end of the relevant section or a brief "Team participation" note: "No update from {name} this week." Never silently omit.
+- Put participation notices in one `## Team participation` section after the
+  three management sections. Use the status-specific behavior below; never
+  describe a system failure as an employee failing to respond.
+  - `confirmed`: no notice.
+  - `expired`: "No update from {name} this week."
+  - `sent`: no notice; the review window is still open.
+  - `on_leave`: no notice; do not create PTO or leave reporting sections.
+  - `send_failed`: "The draft status could not be delivered to {name}."
+  - `collect_failed`: "Status evidence collection failed for {name}."
+  - `draft_failed`: "Draft status generation failed for {name}."
+  - `nudge_failed`: "The status reminder could not be delivered to {name}."
 - Every non-null `ask` from any entry must appear in a **Decisions needed** subsection (add after Mindshare if any asks exist). Render verbatim or near-verbatim.
 - **Never include gap-detection or data-quality commentary** — omit phrases like "no linked Jira tickets", "no linked commits or PRs", "backlog status in Jira despite PRs merging", or similar audit observations. Report only what work happened (`outcome`), blockers, and asks.
 
