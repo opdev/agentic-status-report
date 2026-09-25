@@ -31,7 +31,16 @@ class DraftOutput(BaseModel):
 class SynthesisParticipation(BaseModel):
     person_id: str
     display_name: str
-    status: Literal["confirmed", "expired", "on_leave", "sent", "send_failed"]
+    status: Literal[
+        "confirmed",
+        "expired",
+        "on_leave",
+        "sent",
+        "send_failed",
+        "collect_failed",
+        "draft_failed",
+        "nudge_failed",
+    ]
 
 
 class SynthesisFlag(BaseModel):

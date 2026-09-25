@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/name: weekly-status
     app.kubernetes.io/component: automation
 spec:
-  schedule: "30 13 * * 5"  # Friday 08:30 ET (13:30 UTC winter)
+  schedule: "30 8 * * 5"  # Friday 08:30 ET
   timeZone: "America/New_York"
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -14,6 +14,7 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 1
+      activeDeadlineSeconds: 1800
       template:
         metadata:
           labels:
