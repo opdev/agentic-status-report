@@ -13,6 +13,10 @@ For local setup, Postgres, env vars, and the collect → draft → send dev loop
 ## Quick start
 
 ```bash
+# Install Postgres (Fedora: dnf install postgresql-server, macOS: brew install postgresql)
+# Start it: sudo systemctl start postgresql (or pg_ctl start on macOS)
+createdb weekly_status
+
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
