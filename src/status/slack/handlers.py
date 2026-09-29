@@ -187,6 +187,7 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
         slack_user_id = body["user"]["id"]
         channel = body["channel"]["id"]
         ts = body["message"]["ts"]
+        log.info("confirm clicked by %s for %s week %s", slack_user_id, person_id, week_ending)
 
         try:
             with get_session() as session:
@@ -245,6 +246,7 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
         slack_user_id = body["user"]["id"]
         channel = body["channel"]["id"]
         ts = body["message"]["ts"]
+        log.info("PTO clicked by %s for %s week %s", slack_user_id, person_id, week_ending)
 
         try:
             with get_session() as session:
@@ -299,6 +301,7 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
         slack_user_id = body["user"]["id"]
         channel = body["channel"]["id"]
         message_ts = body["message"]["ts"]
+        log.info("edit clicked by %s", slack_user_id)
 
         try:
             action = body["actions"][0]
@@ -352,6 +355,7 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
         slack_user_id = body["user"]["id"]
         channel = body["channel"]["id"]
         message_ts = body["message"]["ts"]
+        log.info("regenerate clicked by %s", slack_user_id)
 
         try:
             action = body["actions"][0]
@@ -404,6 +408,7 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
         message_ts = metadata["message_ts"]
         entry_ids: list[str] = metadata["entry_ids"]
         existing_unticketed_entry_id = metadata.get("existing_unticketed_entry_id")
+        log.info("edit modal submitted by %s for %s week %s", slack_user_id, person_id, week_ending)
 
         try:
             values = view["state"]["values"]
@@ -486,6 +491,9 @@ def register_handlers(app: Any, *, bot_token: str) -> None:
         week_ending = date.fromisoformat(metadata["week_ending"])
         channel = metadata["channel"]
         message_ts = metadata["message_ts"]
+        log.info(
+            "regenerate modal submitted by %s for %s week %s", slack_user_id, person_id, week_ending
+        )
 
         values = view["state"]["values"]
         reason = None

@@ -181,9 +181,21 @@ def send(
 
 
 @slack_app.command("run")
-def slack_run() -> None:
+def slack_run(
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Log incoming Slack events and handler activity"),
+    ] = False,
+) -> None:
     """Run the Slack Socket Mode handler for draft review."""
     from status.slack.app import SlackAppError, run_socket_mode
+
+    if verbose:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+        console.print("[dim]verbose logging enabled[/]")
 
     try:
         run_socket_mode()
